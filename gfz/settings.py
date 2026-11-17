@@ -18,7 +18,7 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from gfz.plugin import PluginError
+from gfz.plugin import PluginError, split_comma_separated
 
 DEFAULT_CONFIG_PATH = Path("~/.config/gfz/config.toml")
 PLUGIN_TABLE_KEY = "plugin"
@@ -61,7 +61,7 @@ def _split_comma_separated(value: object) -> object:
     """
     if not isinstance(value, str):
         return value
-    return [part.strip() for part in value.split(",") if part.strip()]
+    return split_comma_separated(value)
 
 
 def _ordered_sources(
@@ -149,12 +149,14 @@ class PluginList(BaseSettings):
 def plugin_tables(config_path: Path) -> dict[str, Mapping[str, object]]:
     """Return the config file's `[plugin.<name>]` tables, keyed by plugin name.
 
-    A missing file, or a file with no `plugin` table, gives an empty mapping.
+    A leading `~` in `config_path` expands, as Settings' own read does. A missing
+    file, or a file with no `plugin` table, gives an empty mapping.
 
     Raises:
         PluginError: The file's `plugin` key, or an entry under it, is not a
             table.
     """
+    config_path = config_path.expanduser()
     if not config_path.is_file():
         return {}
     with config_path.open("rb") as config_file:

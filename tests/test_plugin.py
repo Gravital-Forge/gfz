@@ -408,7 +408,7 @@ class TestResolveEntry:
 class TestLoadPlugins:
     """Tests for load_plugins."""
 
-    def test_plugins_load_in_entry_order(self, tmp_path):
+    def test_plugins_load_in_entry_order(self):
         """Each entry loads into a Plugin, in the order the entries list them."""
         plugins = load_plugins(["claude", str(EXAMPLE_DIR)])
 

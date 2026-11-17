@@ -40,6 +40,15 @@ class PluginError(Exception):
     """A plugin entry, manifest, or setting gfz cannot use."""
 
 
+def split_comma_separated(text: str) -> list[str]:
+    """Split a comma-separated string into stripped, non-empty parts.
+
+    Every list gfz reads from an environment variable, core or plugin, splits
+    this way.
+    """
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
 def _has_type(value: object, setting_type: SettingType) -> bool:
     """Return whether `value` is a value of the declared setting type."""
     match setting_type:
@@ -362,7 +371,7 @@ def _from_environment(
         case "string":
             return raw
         case "list":
-            return [part.strip() for part in raw.split(",") if part.strip()]
+            return split_comma_separated(raw)
         case "integer":
             try:
                 return int(raw)

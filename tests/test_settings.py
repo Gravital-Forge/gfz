@@ -1,5 +1,7 @@
 """Tests for gfz's configuration surface: precedence, provenance, and errors."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -101,6 +103,17 @@ def test_plugin_tables_returns_the_config_files_plugin_tables(tmp_path):
     )
 
     assert plugin_tables(config_file) == {"hello": {"greeting": "hi"}, "other": {}}
+
+
+def test_plugin_tables_expands_a_home_relative_path():
+    """The default config path, which starts with ~, reads the file under HOME."""
+    config_file = Path.home() / ".config" / "gfz" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text('[plugin.hello]\ngreeting = "hi"\n', encoding="utf-8")
+
+    assert plugin_tables(Settings.model_fields["config"].default) == {
+        "hello": {"greeting": "hi"}
+    }
 
 
 @pytest.mark.parametrize(
