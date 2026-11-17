@@ -1,0 +1,17 @@
+[global]
+line-length = 100
+cache = false
+extend-enable = ["MD060"]
+
+[MD013]
+line-length = 100
+code-blocks = false
+tables = true
+reflow = true
+reflow-mode = "normalize"
+
+[MD041]
+front-matter-title-pattern = "^(name|title):"
+
+[MD060]
+style = "aligned"

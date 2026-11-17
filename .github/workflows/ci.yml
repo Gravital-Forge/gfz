@@ -1,0 +1,31 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+      # uv puts the tool's binary in its own tool bin directory, which is not on
+      # the job's PATH. Derive that directory rather than hardcoding it, and
+      # confirm poe resolves before Lint and Test, so a path miss surfaces as a
+      # setup failure rather than as a missing command. GITHUB_PATH only takes
+      # effect in later steps, so the check cannot share a step with the install
+      # and still prove what Lint and Test rely on.
+      - name: Install the task runner
+        run: |
+          uv tool install poethepoet==0.49.0
+          uv tool dir --bin >> "$GITHUB_PATH"
+      - name: Confirm the task runner is on the path
+        run: poe --version
+      - name: Lint
+        run: poe lint
+      - name: Test
+        run: poe test
+      - name: Lint the markdown
+        run: uvx rumdl@0.3.4 check .
