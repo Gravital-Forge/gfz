@@ -502,15 +502,24 @@ def provision_command(
     name: Annotated[str, typer.Argument(help="Name of the droplet to provision.")],
     only: Annotated[
         list[str] | None,
-        typer.Option("--only", help="Run only this step. Repeat for more."),
+        typer.Option(
+            "--only",
+            help="Run only this step, or this plugin's steps. Repeat for more.",
+        ),
     ] = None,
     start_from: Annotated[
         str | None,
-        typer.Option("--from", help="Start at this step and run every step after it."),
+        typer.Option(
+            "--from",
+            help="Start at this step or plugin and run every step after it.",
+        ),
     ] = None,
     skip: Annotated[
         list[str] | None,
-        typer.Option("--skip", help="Skip this step. Repeat for more."),
+        typer.Option(
+            "--skip",
+            help="Skip this step, or this plugin's steps. Repeat for more.",
+        ),
     ] = None,
     dry_run: Annotated[
         bool,

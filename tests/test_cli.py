@@ -2,8 +2,10 @@
 
 import re
 import shutil
+from typing import NoReturn
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 import gfz.cli as cli
@@ -88,15 +90,9 @@ UNRENDERABLE_SCRIPTS = pytest.mark.parametrize(
 )
 
 
-def _no_client_call(fake):
-    """Return whether a command made no call at all on the fake client."""
-    return not (
-        fake.create_calls
-        or fake.get_calls
-        or fake.list_calls
-        or fake.delete_calls
-        or fake.power_calls
-    )
+def _unreachable_client() -> NoReturn:
+    """Fail the test: a command built a client, so it could reach DigitalOcean."""
+    pytest.fail("DigitalOcean reached")
 
 
 def _parsed_table(rendered: str) -> dict[str, tuple[str, str]]:
@@ -873,13 +869,22 @@ def test_provision_selects_plugin_steps_by_name_and_by_plugin(
     assert fake_runner.names == expected
 
 
+@pytest.mark.parametrize("flag", ["--only", "--from", "--skip"])
+def test_provision_selection_help_names_a_step_or_a_plugin(flag):
+    """Each selection flag's help says it takes a step name or a plugin name."""
+    provision = typer.main.get_command(app).commands["provision"]
+    option = next(param for param in provision.params if flag in param.opts)
+
+    assert "this step" in option.help
+    assert "plugin" in option.help
+
+
 @UNUSABLE_PLUGINS
 def test_provision_refuses_a_plugin_before_any_digitalocean_call_or_ssh(
     required_environment, monkeypatch, tmp_path, make_entry, message
 ):
     """A plugin that fails to load or resolve exits 1 before reaching the droplet."""
-    fake = FakeHostClient(hosts=[make_host()])
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    monkeypatch.setattr(cli, "DigitalOceanClient", _unreachable_client)
     fake_runner = FakeScriptRunner()
     monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
 
@@ -890,7 +895,6 @@ def test_provision_refuses_a_plugin_before_any_digitalocean_call_or_ssh(
     assert result.exit_code == 1
     assert message in result.stderr
     assert "Traceback" not in result.stderr
-    assert _no_client_call(fake)
     assert fake_runner.runs == []
 
 
@@ -901,8 +905,7 @@ def test_provision_refuses_a_template_that_does_not_render_before_any_call(
 ):
     """A plugin template that does not render exits 1 before reaching the droplet."""
     directory = _plugin_with_script(tmp_path, script)
-    fake = FakeHostClient(hosts=[make_host()])
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    monkeypatch.setattr(cli, "DigitalOceanClient", _unreachable_client)
     fake_runner = FakeScriptRunner()
     monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
 
@@ -915,7 +918,6 @@ def test_provision_refuses_a_template_that_does_not_render_before_any_call(
     assert reason in result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
-    assert _no_client_call(fake)
     assert fake_runner.runs == []
 
 
@@ -1210,8 +1212,7 @@ def test_create_refuses_a_plugin_before_any_digitalocean_call(
     required_environment, monkeypatch, fake_clock, tmp_path, make_entry, message
 ):
     """A plugin that fails to load or resolve exits 1 and creates no droplet."""
-    fake = FakeHostClient()
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    monkeypatch.setattr(cli, "DigitalOceanClient", _unreachable_client)
 
     result = runner.invoke(app, ["--plugin", make_entry(tmp_path), "create", "alpha"])
 
@@ -1219,7 +1220,6 @@ def test_create_refuses_a_plugin_before_any_digitalocean_call(
     assert message in result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
-    assert _no_client_call(fake)
 
 
 @UNRENDERABLE_SCRIPTS
@@ -1228,8 +1228,7 @@ def test_create_refuses_a_template_that_does_not_render_before_any_call(
 ):
     """A plugin template that does not render exits 1 and creates no droplet."""
     directory = _plugin_with_script(tmp_path, script)
-    fake = FakeHostClient()
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    monkeypatch.setattr(cli, "DigitalOceanClient", _unreachable_client)
 
     result = runner.invoke(app, ["--plugin", str(directory), "create", "alpha"])
 
@@ -1239,7 +1238,6 @@ def test_create_refuses_a_template_that_does_not_render_before_any_call(
     assert reason in result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
-    assert _no_client_call(fake)
 
 
 def test_create_progress_lines_go_to_stderr_not_stdout(
