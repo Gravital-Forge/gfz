@@ -12,7 +12,13 @@ from gfz import commands, provision, remote
 from gfz.digitalocean import DigitalOceanClient, DigitalOceanError
 from gfz.hosts import ActionStatus, Host, PowerAction
 from gfz.plugin import Plugin, PluginError, builtin_names, load_plugins
-from gfz.provision import ProvisionResult, StepContexts, StepSelectionError
+from gfz.provision import (
+    ProvisionResult,
+    RenderedStep,
+    RenderError,
+    StepContexts,
+    StepSelectionError,
+)
 from gfz.settings import (
     PluginList,
     Settings,
@@ -139,16 +145,21 @@ def _plugin_list_or_exit(ctx: typer.Context) -> PluginList:
 
 @contextmanager
 def _reporting_failures() -> Iterator[None]:
-    """Catch a CommandError, DigitalOceanError, or PluginError, print it, exit 1.
+    """Catch the failures this CLI reports, print each, and exit 1.
 
     These are the only failure types this CLI catches: every provider failure
     already arrives as a DigitalOceanError, every command refusal as a
-    CommandError, and every plugin it cannot use as a PluginError. None prints
-    a traceback.
+    CommandError, every plugin it cannot use as a PluginError, and every step
+    template that does not render as a RenderError. None prints a traceback.
     """
     try:
         yield
-    except (commands.CommandError, DigitalOceanError, PluginError) as error:
+    except (
+        commands.CommandError,
+        DigitalOceanError,
+        PluginError,
+        RenderError,
+    ) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
 
@@ -276,18 +287,19 @@ def create_command(
 ) -> None:
     """Create a droplet carrying the configured tag, wait for ssh, then provision it.
 
-    Every plugin loads and every plugin setting resolves first, so a plugin gfz
-    cannot use creates no droplet.
+    Every plugin loads, every plugin setting resolves, and every step renders
+    first, so a plugin gfz cannot use creates no droplet.
     """
     settings = _settings_or_exit(ctx)
     with _reporting_failures():
         plugins, contexts = _planned_run(settings)
+        rendered = provision.render_steps(provision.run_order(plugins), contexts)
         host = commands.create_host(
             DigitalOceanClient(), settings, name, report=_report_progress
         )
         typer.echo(_host_line(host))
         if not no_provision:
-            _run_provisioning(settings, host, provision.run_order(plugins), contexts)
+            _run_provisioning(settings, host, rendered)
             typer.echo(provision.closing_line("created", host, settings))
 
 
@@ -411,7 +423,7 @@ def _selected_steps_or_exit(
         raise typer.Exit(code=2) from error
 
 
-def _dry_run_output(rendered: Sequence[provision.RenderedStep]) -> str:
+def _dry_run_output(rendered: Sequence[RenderedStep]) -> str:
     """Render every selected step's script under a header naming the step."""
     blocks = [
         f"# {item.step.name} ({item.step.login.value})\n{item.script}"
@@ -437,12 +449,9 @@ def _provision_summary(result: ProvisionResult) -> str:
 
 
 def _run_provisioning(
-    settings: Settings,
-    host: Host,
-    steps: Sequence[Step],
-    contexts: StepContexts,
+    settings: Settings, host: Host, rendered: Sequence[RenderedStep]
 ) -> None:
-    """Run `steps` on `host`, each against its plugin's context, then print the result.
+    """Run each rendered step on `host`, then print the result.
 
     Progress lines go to stderr, keeping stdout the data channel for the
     run summary this prints once it finishes.
@@ -451,7 +460,6 @@ def _run_provisioning(
         typer.Exit: Exit code 1, after printing the failing step's name and
             the remote stderr, when a mandatory step failed.
     """
-    rendered = provision.render_steps(steps, contexts)
     runner = remote.ssh_runner(settings, host)
     result = provision.provision_host(rendered, runner, _report_progress)
 
@@ -511,8 +519,9 @@ def provision_command(
 ) -> None:
     """Run the core and plugin steps on a droplet.
 
-    Every plugin loads and every plugin setting resolves before gfz looks up
-    the droplet, so a plugin gfz cannot use opens no ssh session.
+    Every plugin loads, every plugin setting resolves, and every selected step
+    renders before gfz looks up the droplet, so a plugin gfz cannot use opens
+    no ssh session.
     """
     settings = _settings_or_exit(ctx)
     with _reporting_failures():
@@ -521,11 +530,12 @@ def provision_command(
         plugins, only=only or (), start_from=start_from, skip=skip or ()
     )
     with _reporting_failures():
+        rendered = provision.render_steps(steps, contexts)
         host = commands.resolve_host(DigitalOceanClient(), name)
         # Refuse a host with no address before --dry-run prints any script.
         commands.host_address(host)
         if dry_run:
-            typer.echo(_dry_run_output(provision.render_steps(steps, contexts)))
+            typer.echo(_dry_run_output(rendered))
         else:
-            _run_provisioning(settings, host, steps, contexts)
+            _run_provisioning(settings, host, rendered)
             typer.echo(provision.closing_line("provisioned", host, settings))

@@ -52,6 +52,19 @@ def _needy_plugin(tmp_path):
     return directory
 
 
+def _plugin_with_script(tmp_path, script):
+    """Write a plugin named `broken` whose one step, `run`, is `script`."""
+    directory = tmp_path / "broken"
+    directory.mkdir()
+    (directory / "plugin.toml").write_text(
+        'name = "broken"\nsummary = "A plugin a test invented."\n\n'
+        '[[steps]]\nslug = "run"\nscript = "run.sh.j2"\nsummary = "The one step."\n',
+        encoding="utf-8",
+    )
+    (directory / "run.sh.j2").write_text(script, encoding="utf-8")
+    return directory
+
+
 def _plugin_with_no_steps(tmp_path):
     """Write a plugin named `empty` that declares no step."""
     directory = tmp_path / "empty"
@@ -60,6 +73,19 @@ def _plugin_with_no_steps(tmp_path):
         'name = "empty"\nsummary = "A plugin with no steps."\n', encoding="utf-8"
     )
     return directory
+
+
+UNRENDERABLE_SCRIPTS = pytest.mark.parametrize(
+    ("script", "reason"),
+    [
+        ("set -euo pipefail\necho {{ plugin.x }\n", "line 2: unexpected '}'"),
+        (
+            "set -euo pipefail\necho {{ plugin.undeclared }}\n",
+            "has no attribute 'undeclared'",
+        ),
+    ],
+    ids=["syntax-error", "undeclared-setting"],
+)
 
 
 def _no_client_call(fake):
@@ -793,7 +819,7 @@ def test_provision_dry_run_renders_a_plugin_step_with_its_setting(
 def test_provision_dry_run_against_a_host_with_no_address_exits_1(
     settings, monkeypatch
 ):
-    """--dry-run against a host with no address exits 1, refusing before any render."""
+    """--dry-run against a host with no address exits 1 and prints no script."""
     host = make_host(ip=None)
     fake = FakeHostClient(hosts=[host])
     monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
@@ -866,6 +892,50 @@ def test_provision_refuses_a_plugin_before_any_digitalocean_call_or_ssh(
     assert "Traceback" not in result.stderr
     assert _no_client_call(fake)
     assert fake_runner.runs == []
+
+
+@UNRENDERABLE_SCRIPTS
+@pytest.mark.parametrize("dry_run", [[], ["--dry-run"]], ids=["run", "dry-run"])
+def test_provision_refuses_a_template_that_does_not_render_before_any_call(
+    required_environment, monkeypatch, tmp_path, script, reason, dry_run
+):
+    """A plugin template that does not render exits 1 before reaching the droplet."""
+    directory = _plugin_with_script(tmp_path, script)
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner()
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(
+        app, ["--plugin", str(directory), "provision", "alpha", *dry_run]
+    )
+
+    assert result.exit_code == 1
+    assert "broken/run" in result.stderr
+    assert reason in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert _no_client_call(fake)
+    assert fake_runner.runs == []
+
+
+def test_provision_renders_only_the_selected_steps(
+    required_environment, monkeypatch, tmp_path
+):
+    """A template outside the selection is never rendered, so it cannot fail the run."""
+    directory = _plugin_with_script(tmp_path, "{% if %}\n")
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner()
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(
+        app,
+        ["--plugin", str(directory), "provision", "alpha", "--skip", "broken"],
+    )
+
+    assert result.exit_code == 0
+    assert fake_runner.names == CORE_NAMES
 
 
 @pytest.mark.parametrize(
@@ -1147,6 +1217,26 @@ def test_create_refuses_a_plugin_before_any_digitalocean_call(
 
     assert result.exit_code == 1
     assert message in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert _no_client_call(fake)
+
+
+@UNRENDERABLE_SCRIPTS
+def test_create_refuses_a_template_that_does_not_render_before_any_call(
+    required_environment, monkeypatch, fake_clock, tmp_path, script, reason
+):
+    """A plugin template that does not render exits 1 and creates no droplet."""
+    directory = _plugin_with_script(tmp_path, script)
+    fake = FakeHostClient()
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+
+    result = runner.invoke(app, ["--plugin", str(directory), "create", "alpha"])
+
+    assert result.exit_code == 1
+    assert "broken/run" in result.stderr
+    assert str(directory / "run.sh.j2") in result.stderr
+    assert reason in result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
     assert _no_client_call(fake)

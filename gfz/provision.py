@@ -8,7 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from jinja2 import (
+    Environment,
+    FileSystemLoader,
+    StrictUndefined,
+    TemplateError,
+    TemplateSyntaxError,
+)
 
 from gfz.commands import host_address
 from gfz.hosts import Host
@@ -27,6 +33,10 @@ ClosingVerb = Literal["created", "provisioned"]
 
 class StepSelectionError(Exception):
     """A step selection names no step, or combines flags that cannot combine."""
+
+
+class RenderError(Exception):
+    """A step's template does not render."""
 
 
 @dataclass(frozen=True)
@@ -226,17 +236,41 @@ def template_environment(directory: Path) -> Environment:
     return environment
 
 
+def _render(step: Step, context: Mapping[str, object]) -> str:
+    """Render one step's template against `context`.
+
+    Raises:
+        RenderError: The template, or a template it includes, has a syntax
+            error, reads a value the context lacks, or cannot be found.
+    """
+    try:
+        return (
+            template_environment(step.directory)
+            .get_template(step.template)
+            .render(context)
+        )
+    except TemplateSyntaxError as error:
+        raise RenderError(
+            f"step {step.name}: {step.directory / step.template} does not render:"
+            f" {error.filename}, line {error.lineno}: {error.message}"
+        ) from error
+    except TemplateError as error:
+        raise RenderError(
+            f"step {step.name}: {step.directory / step.template} does not render:"
+            f" {error.message}"
+        ) from error
+
+
 def render_steps(
     steps: Sequence[Step], contexts: StepContexts
 ) -> tuple[RenderedStep, ...]:
-    """Render each step's template against the context for its plugin."""
+    """Render each step's template against the context for its plugin.
+
+    Raises:
+        RenderError: A step's template does not render.
+    """
     return tuple(
-        RenderedStep(
-            step=step,
-            script=template_environment(step.directory)
-            .get_template(step.template)
-            .render(contexts[step.plugin]),
-        )
+        RenderedStep(step=step, script=_render(step, contexts[step.plugin]))
         for step in steps
     )
 

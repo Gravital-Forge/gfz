@@ -7,6 +7,7 @@ from gfz.commands import CommandError
 from gfz.plugin import PluginError, load_plugin, load_plugins
 from gfz.provision import (
     RenderedStep,
+    RenderError,
     StepSelectionError,
     closing_line,
     plugin_contexts,
@@ -377,7 +378,10 @@ class TestRenderSteps:
     def test_a_plugin_template_reading_an_undeclared_setting_raises(
         self, settings, tmp_path
     ):
-        """`plugin.<name>` for a setting the manifest lacks raises UndefinedError."""
+        """`plugin.<name>` for a setting the manifest lacks raises RenderError.
+
+        The error names the step and its template, and keeps Jinja's reason.
+        """
         directory = _write_plugin(
             tmp_path / "probe",
             ONE_STEP_MANIFEST.format(settings=""),
@@ -385,7 +389,48 @@ class TestRenderSteps:
         )
         plugin = load_plugin(directory)
 
-        with pytest.raises(jinja2.UndefinedError):
+        with pytest.raises(RenderError) as excinfo:
+            render_steps(plugin.steps, plugin_contexts(settings, (plugin,), {}, {}))
+
+        message = str(excinfo.value)
+        assert "probe/one" in message
+        assert str(directory / "one.sh.j2") in message
+        assert "has no attribute 'missing'" in message
+        assert isinstance(excinfo.value.__cause__, jinja2.UndefinedError)
+
+    def test_a_template_syntax_error_raises_naming_the_file_and_line(
+        self, settings, tmp_path
+    ):
+        """A syntax error raises RenderError naming the step, file, and line."""
+        directory = _write_plugin(
+            tmp_path / "probe",
+            ONE_STEP_MANIFEST.format(settings=""),
+            {"one.sh.j2": "set -euo pipefail\necho {{ plugin.x }\n"},
+        )
+        plugin = load_plugin(directory)
+
+        with pytest.raises(RenderError) as excinfo:
+            render_steps(plugin.steps, plugin_contexts(settings, (plugin,), {}, {}))
+
+        message = str(excinfo.value)
+        assert "probe/one" in message
+        assert f"{directory / 'one.sh.j2'}, line 2: unexpected '}}'" in message
+
+    def test_a_syntax_error_in_an_include_names_the_included_file(
+        self, settings, tmp_path
+    ):
+        """A syntax error inside an include names the included file and its line."""
+        directory = _write_plugin(
+            tmp_path / "probe",
+            ONE_STEP_MANIFEST.format(settings=""),
+            {
+                "one.sh.j2": 'set -euo pipefail\n{% include "_part.j2" %}\n',
+                "_part.j2": "{% if %}\n",
+            },
+        )
+        plugin = load_plugin(directory)
+
+        with pytest.raises(RenderError, match=r"_part\.j2, line 1: "):
             render_steps(plugin.steps, plugin_contexts(settings, (plugin,), {}, {}))
 
     def test_one_environment_serves_each_template_directory(self, tmp_path):
@@ -411,11 +456,11 @@ class TestRenderSteps:
     def test_a_context_missing_a_key_a_template_reads_raises_undefined_error(
         self, template_context
     ):
-        """A context missing agent_user raises UndefinedError, not a silent blank."""
+        """A context missing agent_user raises RenderError, not a silent blank."""
         incomplete_context = dict(template_context)
         del incomplete_context["agent_user"]
 
-        with pytest.raises(jinja2.UndefinedError):
+        with pytest.raises(RenderError, match="'agent_user' is undefined"):
             render_steps(STEPS, {None: incomplete_context})
 
 
