@@ -1,0 +1,14 @@
+name = "hello"
+summary = "Write a greeting into the agent's home."
+
+[settings.greeting]
+type = "string"
+default = "hello"
+
+[[steps]]
+slug = "greet"
+script = "greet.sh.j2"
+summary = "Write the greeting to ~/hello.txt."
+login = "root"
+forward_agent = false
+mandatory = true

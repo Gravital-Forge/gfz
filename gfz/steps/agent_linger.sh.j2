@@ -1,0 +1,16 @@
+set -euo pipefail
+
+agent_uid="$(id -u "{{ agent_user }}")"
+bus_path="/run/user/${agent_uid}/bus"
+
+loginctl enable-linger "{{ agent_user }}"
+
+attempt=0
+while [ ! -S "$bus_path" ]; do
+  if [ "$attempt" -ge 120 ]; then
+    echo "timed out waiting for ${bus_path}" >&2
+    exit 1
+  fi
+  sleep 0.5
+  attempt=$((attempt + 1))
+done

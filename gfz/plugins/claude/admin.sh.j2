@@ -1,0 +1,6 @@
+set -euo pipefail
+
+if [ ! -x "{{ admin_home }}/.local/bin/claude" ]; then
+  sudo -u "{{ admin_user }}" -i bash -c \
+    'curl -fsSL https://claude.ai/install.sh | bash'
+fi

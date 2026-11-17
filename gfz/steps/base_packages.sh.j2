@@ -1,0 +1,5 @@
+set -euo pipefail
+
+{% include "_apt.j2" %}
+apt_get update
+apt_get install -y ca-certificates curl git acl dbus-user-session python3

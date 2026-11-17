@@ -1,0 +1,7 @@
+export DEBIAN_FRONTEND=noninteractive
+
+# A fresh droplet's first-boot upgrader holds the dpkg lock for minutes,
+# and apt fails at once without this timeout.
+apt_get() {
+  apt-get -o DPkg::Lock::Timeout=600 "$@"
+}

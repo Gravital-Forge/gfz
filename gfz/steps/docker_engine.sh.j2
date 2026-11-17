@@ -1,0 +1,10 @@
+set -euo pipefail
+
+{% include "_apt.j2" %}
+apt_get install -y \
+  docker-ce \
+  docker-ce-cli \
+  containerd.io \
+  docker-ce-rootless-extras \
+  uidmap \
+  slirp4netns
