@@ -23,9 +23,9 @@ environment = Environment(
 )
 environment.filters["shell_quote"] = shlex.quote
 
-MINTER_CONTAINER = "github-app-minter"
-
 StepStatus = Literal["ok", "warned", "failed"]
+
+ClosingVerb = Literal["created", "provisioned"]
 
 
 class StepSelectionError(Exception):
@@ -80,15 +80,6 @@ def step_context(settings: Settings) -> dict[str, object]:
         "admin_home": _admin_home(settings),
         "agent_user": settings.agent_user,
         "agent_home": _agent_home(settings),
-        "workspace": _workspace(settings),
-        "harness_repo": settings.harness_repo,
-        "repos": list(settings.repos),
-        "harness_checkout": f"{_admin_home(settings)}/harness",
-        "minter_container": MINTER_CONTAINER,
-        "github_app_id": settings.github_app_id,
-        "github_app_installation_id": settings.github_app_installation_id,
-        "git_name": settings.git_name,
-        "git_email": settings.git_email,
     }
 
 
@@ -102,46 +93,15 @@ def _agent_home(settings: Settings) -> str:
     return f"/home/{settings.agent_user}"
 
 
-def _agent_tree(settings: Settings) -> str:
-    """Return the agent's tree, the directory that holds its workspace."""
-    return f"{_agent_home(settings)}/Projects"
-
-
-def _workspace(settings: Settings) -> str:
-    """Return the harness workspace inside the agent's tree."""
-    return f"{_agent_tree(settings)}/dev"
-
-
-def clone_context(settings: Settings, repo: str) -> dict[str, object]:
-    """Return the Jinja context for cloning one repository alone.
-
-    This is `step_context(settings)` with `"repos"` replaced by a
-    single-element list holding `repo`.
-    """
-    return {**step_context(settings), "repos": [repo]}
-
-
-def handoff_lines(settings: Settings, host: Host) -> tuple[str, ...]:
-    """Return the manual steps a person still has to run after provisioning.
-
-    The key load stays manual so the App's private key never passes through
-    gfz: it goes from the operator's machine over ssh's stdin straight into
-    the minter. The `claude` step stays manual because the agent's first
-    `claude` run authenticates a person.
+def closing_line(verb: ClosingVerb, host: Host, settings: Settings) -> str:
+    """Return the line that ends a provisioning run, naming what it left behind.
 
     Raises:
         CommandError: `host` has no address.
     """
-    address = host_address(host)
-    identity = shlex.quote(str(settings.ssh_identity.expanduser()))
     return (
-        "1. Load the GitHub App's private key from this machine, then delete every"
-        " copy of the key file:",
-        '   export APP_KEY_FILE="<path>"   # the App\'s private key file,'
-        " on this machine",
-        f"   ssh -i {identity} {settings.admin_user}@{address} sudo docker exec -i"
-        f' {MINTER_CONTAINER} github-app-minter key set < "$APP_KEY_FILE"',
-        f"2. ssh -i {identity} {settings.agent_user}@{address}, then run: claude",
+        f"droplet {host.name} ({host_address(host)}) {verb}"
+        f" with agent user {settings.agent_user}"
     )
 
 

@@ -1,5 +1,0 @@
-# An scp-style remote carries no slash after the colon, so the host part
-# goes before the basename.
-repo_directory() {
-  basename "${1##*:}" .git
-}

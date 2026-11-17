@@ -12,10 +12,11 @@ from gfz.digitalocean import DigitalOceanClient, DigitalOceanError
 from gfz.hosts import ActionStatus, Host, PowerAction
 from gfz.provision import ProvisionResult, StepSelectionError
 from gfz.settings import Settings, configuration_error_message, resolved_options
-from gfz.steps.registry import CLONE_REPOS_SLUG, STEPS, Step
+from gfz.steps.registry import STEPS, Step
 
 app = typer.Typer(
-    no_args_is_help=True, help="Manage this deployment's agent host droplets."
+    no_args_is_help=True,
+    help="Create and provision DigitalOcean droplets for coding agents.",
 )
 config_app = typer.Typer(
     no_args_is_help=True, help="Inspect gfz's resolved configuration."
@@ -32,18 +33,6 @@ def main(
     agent_user: Annotated[
         str | None, typer.Option(help="The agent account created on each droplet.")
     ] = None,
-    git_name: Annotated[
-        str | None,
-        typer.Option(
-            help="The name the agent's commits carry, set as its global git identity."
-        ),
-    ] = None,
-    git_email: Annotated[
-        str | None,
-        typer.Option(
-            help="The email the agent's commits carry, set as its global git identity."
-        ),
-    ] = None,
     ssh_keys: Annotated[
         str | None,
         typer.Option(help="DigitalOcean account SSH keys to install, comma-separated."),
@@ -51,25 +40,6 @@ def main(
     ssh_identity: Annotated[
         str | None,
         typer.Option(help="Local private key path used to reach a droplet."),
-    ] = None,
-    harness_repo: Annotated[
-        str | None, typer.Option(help="The harness repository a droplet clones.")
-    ] = None,
-    github_app_id: Annotated[
-        str | None,
-        typer.Option(help="The GitHub App's ID, from the App's settings page."),
-    ] = None,
-    github_app_installation_id: Annotated[
-        str | None,
-        typer.Option(
-            help=(
-                "The App installation's ID, the number that ends its settings page URL."
-            )
-        ),
-    ] = None,
-    repos: Annotated[
-        str | None,
-        typer.Option(help="Extra repositories a droplet clones, comma-separated."),
     ] = None,
     region: Annotated[
         str | None,
@@ -88,7 +58,7 @@ def main(
         str | None, typer.Option(help="Path to gfz's TOML config file.")
     ] = None,
 ) -> None:
-    """Manage this deployment's agent host droplets.
+    """Create and provision DigitalOcean droplets for coding agents.
 
     Every option here overrides the matching `GFZ_` environment variable and
     config file entry for the subcommand that follows it.
@@ -96,14 +66,8 @@ def main(
     overrides = {
         "admin_user": admin_user,
         "agent_user": agent_user,
-        "git_name": git_name,
-        "git_email": git_email,
         "ssh_keys": ssh_keys,
         "ssh_identity": ssh_identity,
-        "harness_repo": harness_repo,
-        "github_app_id": github_app_id,
-        "github_app_installation_id": github_app_installation_id,
-        "repos": repos,
         "region": region,
         "size": size,
         "image": image,
@@ -241,7 +205,7 @@ def list_hosts_command(
         ),
     ] = None,
 ) -> None:
-    """List this deployment's agent host droplets."""
+    """List the droplets carrying the configured tag, or every droplet with --all."""
     settings = _settings_or_exit(ctx)
     with _reporting_failures():
         hosts = commands.list_hosts(
@@ -272,7 +236,7 @@ def create_command(
         if not no_provision:
             context = provision.step_context(settings)
             _run_provisioning(settings, host, provision.select_steps(), context)
-            typer.echo(_handoff_output(settings, host))
+            typer.echo(provision.closing_line("created", host, settings))
 
 
 @app.command("destroy")
@@ -412,14 +376,6 @@ def _provision_summary(result: ProvisionResult) -> str:
     return "\n".join(lines)
 
 
-HANDOFF_HEADER = "two manual steps remain:"
-
-
-def _handoff_output(settings: Settings, host: Host) -> str:
-    """Render the hand-off header and its numbered steps as one block."""
-    return "\n".join((HANDOFF_HEADER, *provision.handoff_lines(settings, host)))
-
-
 def _run_provisioning(
     settings: Settings,
     host: Host,
@@ -491,19 +447,4 @@ def provision_command(
             typer.echo(_dry_run_output(provision.render_steps(steps, context)))
         else:
             _run_provisioning(settings, host, steps, context)
-        typer.echo(_handoff_output(settings, host))
-
-
-@app.command("clone")
-def clone_command(
-    ctx: typer.Context,
-    name: Annotated[str, typer.Argument(help="Name of the droplet to clone into.")],
-    repo: Annotated[str, typer.Argument(help="The repository to clone.")],
-) -> None:
-    """Clone one repository into the agent's workspace on a droplet."""
-    settings = _settings_or_exit(ctx)
-    steps = provision.select_steps(only=(CLONE_REPOS_SLUG,))
-    with _reporting_failures():
-        host = commands.resolve_host(DigitalOceanClient(), name)
-        context = provision.clone_context(settings, repo)
-        _run_provisioning(settings, host, steps, context)
+            typer.echo(provision.closing_line("provisioned", host, settings))

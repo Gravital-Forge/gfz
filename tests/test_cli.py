@@ -12,7 +12,7 @@ import gfz.provision
 import gfz.remote
 from gfz.cli import app
 from gfz.digitalocean import DigitalOceanError
-from gfz.steps.registry import STEPS, Login
+from gfz.steps.registry import STEPS
 from tests.conftest import (
     NEW_HOST_ID,
     REMOTE_FAILURE_STDERR,
@@ -51,7 +51,7 @@ def test_show_with_required_env_exits_zero_and_lists_every_option(required_envir
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
-    expected_names = ("admin_user", "agent_user", "git_name", "ssh_keys", "region")
+    expected_names = ("admin_user", "agent_user", "ssh_keys", "ssh_identity", "region")
     for name in (*expected_names, "DIGITALOCEAN_TOKEN"):
         assert name in result.stdout
 
@@ -68,14 +68,31 @@ def test_flag_beats_environment_in_the_printed_table(required_environment, monke
     assert table["agent_user"] == ("agent", "environment")
 
 
-def test_show_lists_both_github_app_ids_with_their_sources(required_environment):
-    """Show lists the App ID by flag and the installation ID by environment."""
-    result = runner.invoke(app, ["--github-app-id", "42", "config", "show"])
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--harness-repo",
+        "--repos",
+        "--github-app-id",
+        "--github-app-installation-id",
+        "--git-name",
+        "--git-email",
+    ],
+)
+def test_a_removed_option_is_refused_as_unknown(required_environment, flag):
+    """The clone, minter, and git identity flags no longer exist."""
+    result = runner.invoke(app, [flag, "value", "config", "show"])
 
-    assert result.exit_code == 0
-    table = _parsed_table(result.stdout)
-    assert table["github_app_id"] == ("42", "flag")
-    assert table["github_app_installation_id"] == ("7654321", "environment")
+    assert result.exit_code == 2
+    assert "No such option" in result.stderr
+
+
+def test_the_clone_command_no_longer_exists(required_environment):
+    """`gfz clone` is refused as an unknown command."""
+    result = runner.invoke(app, ["clone", "alpha", "git@example.com:org/one.git"])
+
+    assert result.exit_code == 2
+    assert "No such command" in result.stderr
 
 
 def test_unsupplied_option_reports_its_default(required_environment):
@@ -497,10 +514,17 @@ def test_steps_prints_a_header_and_one_row_per_registered_step(required_environm
         assert step.summary in line
 
 
-def test_provision_dry_run_prints_every_step_script_and_the_handoff(
-    settings, monkeypatch
+PROVISIONED_LINE = "droplet alpha (203.0.113.10) provisioned with agent user agent"
+CREATED_LINE = "droplet alpha (203.0.113.10) created with agent user agent"
+
+
+def test_provision_dry_run_prints_every_step_script_and_no_closing_line(
+    required_environment, monkeypatch
 ):
-    """--dry-run prints every step's script, opens no ssh, and prints the hand-off."""
+    """--dry-run prints every step's script, opens no ssh, and prints no closing line.
+
+    A dry run provisions nothing, so no line may say the droplet was provisioned.
+    """
     host = make_host()
     fake = FakeHostClient(hosts=[host])
     monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
@@ -517,8 +541,7 @@ def test_provision_dry_run_prints_every_step_script_and_the_handoff(
     assert result.stdout.count("set -euo pipefail") == len(STEPS)
     for step in STEPS:
         assert f"# {step.slug} ({step.login.value})" in result.stdout
-    for line in gfz.provision.handoff_lines(settings, host):
-        assert line in result.stdout
+    assert "provisioned with agent user" not in result.stdout
 
 
 def test_provision_dry_run_against_a_host_with_no_address_exits_1(
@@ -553,10 +576,11 @@ def test_provision_runs_every_registered_step_and_prints_the_summary(
     assert fake_runner.slugs == [step.slug for step in STEPS]
 
 
-def test_provision_prints_the_handoff_after_the_run_summary(settings, monkeypatch):
-    """A clean run prints the summary, then the hand-off, in that order."""
-    host = make_host()
-    fake = FakeHostClient(hosts=[host])
+def test_provision_ends_with_the_summary_then_the_closing_line(
+    required_environment, monkeypatch
+):
+    """A clean run's stdout is the summary, then the provisioned line, and no more."""
+    fake = FakeHostClient(hosts=[make_host()])
     monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
     fake_runner = FakeScriptRunner()
     monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
@@ -564,19 +588,17 @@ def test_provision_prints_the_handoff_after_the_run_summary(settings, monkeypatc
     result = runner.invoke(app, ["provision", "alpha"])
 
     assert result.exit_code == 0
-    summary_line = f"{len(STEPS)} steps ran, all succeeded"
-    assert summary_line in result.stdout
-    assert cli.HANDOFF_HEADER in result.stdout
-    assert "two manual steps remain:" in result.stdout
-    assert result.stdout.index(summary_line) < result.stdout.index(cli.HANDOFF_HEADER)
+    assert result.stdout.splitlines() == [
+        f"{len(STEPS)} steps ran, all succeeded",
+        PROVISIONED_LINE,
+    ]
 
 
-def test_provision_with_an_optional_step_failure_still_prints_the_handoff(
-    settings, monkeypatch
+def test_provision_with_an_optional_step_failure_still_prints_the_closing_line(
+    required_environment, monkeypatch
 ):
-    """An optional step's failure exits 0 and the hand-off still prints."""
-    host = make_host()
-    fake = FakeHostClient(hosts=[host])
+    """An optional step's failure exits 0, and the closing line ends stdout."""
+    fake = FakeHostClient(hosts=[make_host()])
     monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
     fake_runner = FakeScriptRunner(failures={"admin-tools": 5})
     monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
@@ -584,16 +606,14 @@ def test_provision_with_an_optional_step_failure_still_prints_the_handoff(
     result = runner.invoke(app, ["provision", "alpha"])
 
     assert result.exit_code == 0
-    for line in gfz.provision.handoff_lines(settings, host):
-        assert line in result.stdout
+    assert result.stdout.splitlines()[-1] == PROVISIONED_LINE
 
 
-def test_provision_stopped_by_a_mandatory_failure_prints_no_handoff(
-    settings, monkeypatch
+def test_provision_stopped_by_a_mandatory_failure_prints_no_closing_line(
+    required_environment, monkeypatch
 ):
-    """A mandatory step's failure exits 1 and prints neither hand-off line."""
-    host = make_host()
-    fake = FakeHostClient(hosts=[host])
+    """A mandatory step's failure exits 1 and claims nothing was provisioned."""
+    fake = FakeHostClient(hosts=[make_host()])
     monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
     failing_slug = STEPS[0].slug
     fake_runner = FakeScriptRunner(failures={failing_slug: 3})
@@ -603,9 +623,7 @@ def test_provision_stopped_by_a_mandatory_failure_prints_no_handoff(
 
     assert result.exit_code == 1
     combined_output = result.stdout + result.stderr
-    assert cli.HANDOFF_HEADER not in combined_output
-    for line in gfz.provision.handoff_lines(settings, host):
-        assert line not in combined_output
+    assert "provisioned with agent user" not in combined_output
 
 
 def test_provision_stops_on_a_mandatory_step_failure(required_environment, monkeypatch):
@@ -777,13 +795,12 @@ def test_create_progress_lines_go_to_stderr_not_stdout(
     assert "alpha" in result.stdout
     assert "203.0.113.10" in result.stdout
     assert f"{len(STEPS)} steps ran, all succeeded" in result.stdout
-    assert cli.HANDOFF_HEADER in result.stdout
 
 
-def test_create_prints_the_handoff_after_the_run_summary_when_it_provisions(
-    settings, monkeypatch, fake_clock
+def test_create_ends_with_the_summary_then_the_closing_line(
+    required_environment, monkeypatch, fake_clock
 ):
-    """Create that provisions prints the summary, then the hand-off, in that order."""
+    """Create that provisions ends stdout with the summary, then the created line."""
     monkeypatch.setattr(commands, "probe_tcp_port", lambda address, port: True)
     active = make_host(id=NEW_HOST_ID, name="alpha", status="active", ip="203.0.113.10")
     fake = FakeHostClient(polls=[active])
@@ -794,18 +811,16 @@ def test_create_prints_the_handoff_after_the_run_summary_when_it_provisions(
     result = runner.invoke(app, ["create", "alpha"])
 
     assert result.exit_code == 0
-    summary_line = f"{len(STEPS)} steps ran, all succeeded"
-    assert summary_line in result.stdout
-    assert cli.HANDOFF_HEADER in result.stdout
-    assert result.stdout.index(summary_line) < result.stdout.index(cli.HANDOFF_HEADER)
-    for line in gfz.provision.handoff_lines(settings, active):
-        assert line in result.stdout
+    assert result.stdout.splitlines()[-2:] == [
+        f"{len(STEPS)} steps ran, all succeeded",
+        CREATED_LINE,
+    ]
 
 
-def test_create_no_provision_prints_no_handoff(
+def test_create_no_provision_prints_the_host_line_and_no_closing_line(
     required_environment, monkeypatch, fake_clock
 ):
-    """--no-provision prints no hand-off block."""
+    """--no-provision prints the host line alone, and no closing line."""
     monkeypatch.setattr(commands, "probe_tcp_port", lambda address, port: True)
     active = make_host(id=NEW_HOST_ID, name="alpha", status="active", ip="203.0.113.10")
     fake = FakeHostClient(polls=[active])
@@ -814,72 +829,9 @@ def test_create_no_provision_prints_no_handoff(
     result = runner.invoke(app, ["create", "alpha", "--no-provision"])
 
     assert result.exit_code == 0
-    assert cli.HANDOFF_HEADER not in result.stdout
-
-
-def test_clone_runs_the_clone_repos_step_over_the_admin_login_with_forwarding(
-    required_environment, monkeypatch
-):
-    """Clone runs exactly clone-repos, as admin, with the ssh agent forwarded."""
-    fake = FakeHostClient(hosts=[make_host()])
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
-    fake_runner = FakeScriptRunner()
-    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
-
-    result = runner.invoke(app, ["clone", "alpha", "git@example.com:org/one.git"])
-
-    assert result.exit_code == 0
-    assert fake_runner.slugs == ["clone-repos"]
-    assert "1 step ran, all succeeded" in result.stdout
-    ran_step, _ = fake_runner.runs[0]
-    assert ran_step.login is Login.ADMIN
-    assert ran_step.forward_agent is True
-
-
-def test_clone_renders_the_named_repository_and_not_the_configured_repos(
-    required_environment, monkeypatch
-):
-    """The script names the one repository, not a repository GFZ_REPOS configures."""
-    monkeypatch.setenv("GFZ_REPOS", "git@github.com:example/configured.git")
-    fake = FakeHostClient(hosts=[make_host()])
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
-    fake_runner = FakeScriptRunner()
-    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
-
-    result = runner.invoke(app, ["clone", "alpha", "git@example.com:org/one.git"])
-
-    assert result.exit_code == 0
-    _, script = fake_runner.runs[0]
-    assert "git@example.com:org/one.git" in script
-    assert "git@github.com:example/configured.git" not in script
-
-
-def test_clone_failure_exits_1_without_a_traceback(required_environment, monkeypatch):
-    """A failing clone-repos run exits 1, without a traceback, and shows stderr."""
-    fake = FakeHostClient(hosts=[make_host()])
-    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
-    fake_runner = FakeScriptRunner(failures={"clone-repos": 1})
-    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
-
-    result = runner.invoke(app, ["clone", "alpha", "git@example.com:org/one.git"])
-
-    assert result.exit_code == 1
-    assert "Traceback" not in result.stderr
-    assert REMOTE_FAILURE_STDERR in result.stderr
-
-
-def test_clone_help_documents_the_command_and_both_arguments(required_environment):
-    """`gfz clone --help` exits 0 and documents the droplet and the repository.
-
-    Rich wraps the help table to the terminal width, so the assertions run
-    against the output with its runs of whitespace collapsed.
-    """
-    result = runner.invoke(app, ["clone", "--help"])
-
-    assert result.exit_code == 0
-    help_text = " ".join(result.stdout.split())
-    assert "Name of the droplet to clone into." in help_text
-    assert "The repository to clone." in help_text
+    assert result.stdout.splitlines() == [
+        f"alpha (id {NEW_HOST_ID}): status active, address 203.0.113.10"
+    ]
 
 
 def test_create_no_provision_runs_no_step(

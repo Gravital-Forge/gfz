@@ -58,7 +58,6 @@ def test_unsupplied_optional_options_take_their_field_default(required_environme
     assert settings.size == "s-4vcpu-8gb"
     assert settings.image == "ubuntu-24-04-x64"
     assert settings.tag == "gfz"
-    assert settings.repos == []
 
 
 def test_missing_config_file_is_not_an_error(
@@ -136,87 +135,20 @@ def test_ssh_keys_init_kwarg_comma_separated_resolves_to_same_list(
     assert settings.ssh_keys == ["alpha", "bravo"]
 
 
-def test_repos_env_comma_separated_resolves_to_list(required_environment, monkeypatch):
-    """GFZ_REPOS as a comma-separated string resolves to a list of stripped values."""
-    monkeypatch.setenv("GFZ_REPOS", "repo-one, repo-two")
-
-    settings = Settings()
-
-    assert settings.repos == ["repo-one", "repo-two"]
-
-
-def test_repos_toml_array_resolves_to_same_list(
-    required_environment, monkeypatch, tmp_path
-):
-    """A TOML array for repos resolves to the same list as the comma-separated form."""
-    config_file = tmp_path / "config.toml"
-    config_file.write_text('repos = ["repo-one", "repo-two"]\n', encoding="utf-8")
-    monkeypatch.setenv("GFZ_CONFIG", str(config_file))
-
-    settings = Settings()
-
-    assert settings.repos == ["repo-one", "repo-two"]
-
-
-def test_repos_init_kwarg_comma_separated_resolves_to_same_list(required_environment):
-    """A comma-separated repos init keyword argument resolves to the same list."""
-    settings = Settings(repos="repo-one,repo-two")
-
-    assert settings.repos == ["repo-one", "repo-two"]
-
-
-def test_git_identity_options_resolve_from_the_environment(required_environment):
-    """The committer name and email resolve from their GFZ_ environment variables."""
-    settings = Settings()
-
-    assert settings.git_name == "Agent Example"
-    assert settings.git_email == "agent@example.com"
-
-
-def test_missing_git_name_names_its_flag_variable_and_config_key(
-    required_environment, monkeypatch
-):
-    """A missing committer name reports its flag, variable, and config key."""
-    monkeypatch.delenv("GFZ_GIT_NAME")
-
-    with pytest.raises(ValidationError) as excinfo:
-        Settings()
-
-    message = configuration_error_message(excinfo.value)
-
-    assert "--git-name" in message
-    assert "GFZ_GIT_NAME" in message
-    assert "set git_name in the config file" in message
-
-
-def test_empty_git_name_environment_variable_reads_as_unsupplied(
-    required_environment, monkeypatch
-):
-    """An empty GFZ_GIT_NAME fails with the message an absent option gets."""
-    monkeypatch.setenv("GFZ_GIT_NAME", "")
-
-    with pytest.raises(ValidationError) as excinfo:
-        Settings()
-
-    assert configuration_error_message(excinfo.value).startswith(
-        "git_name is required: pass --git-name, set GFZ_GIT_NAME"
-    )
-
-
-def test_missing_git_email_names_its_flag_variable_and_config_key(
-    required_environment, monkeypatch
-):
-    """A missing committer email reports its flag, variable, and config key."""
-    monkeypatch.delenv("GFZ_GIT_EMAIL")
-
-    with pytest.raises(ValidationError) as excinfo:
-        Settings()
-
-    message = configuration_error_message(excinfo.value)
-
-    assert "--git-email" in message
-    assert "GFZ_GIT_EMAIL" in message
-    assert "set git_email in the config file" in message
+@pytest.mark.parametrize(
+    "removed",
+    [
+        "harness_repo",
+        "repos",
+        "github_app_id",
+        "github_app_installation_id",
+        "git_name",
+        "git_email",
+    ],
+)
+def test_no_deployment_specific_setting_survives(removed):
+    """Settings carries none of the clone, minter, or git identity settings."""
+    assert removed not in Settings.model_fields
 
 
 def test_agent_user_of_lowercase_letters_digits_and_hyphens_is_accepted(
@@ -240,61 +172,6 @@ def test_agent_user_outside_the_user_name_rule_is_refused(required_environment, 
     """An uppercase, underscored, or 33-character agent user raises ValidationError."""
     with pytest.raises(ValidationError):
         Settings(agent_user=name)
-
-
-def test_github_app_ids_resolve_from_the_environment_as_integers(
-    required_environment,
-):
-    """The App ID and the installation ID resolve from GFZ_ variables as integers."""
-    settings = Settings()
-
-    assert settings.github_app_id == 123456
-    assert settings.github_app_installation_id == 7654321
-
-
-@pytest.mark.parametrize(
-    ("field_name", "variable"),
-    [
-        ("github_app_id", "GFZ_GITHUB_APP_ID"),
-        ("github_app_installation_id", "GFZ_GITHUB_APP_INSTALLATION_ID"),
-    ],
-)
-def test_missing_github_app_id_names_its_flag_variable_and_config_key(
-    required_environment, monkeypatch, field_name, variable
-):
-    """A missing App ID or installation ID is required, named by all three names."""
-    monkeypatch.delenv(variable)
-
-    with pytest.raises(ValidationError) as excinfo:
-        Settings()
-
-    flag = f"--{field_name.replace('_', '-')}"
-    assert configuration_error_message(excinfo.value) == (
-        f"{field_name} is required: pass {flag}, set {variable}, "
-        f"or set {field_name} in the config file"
-    )
-
-
-@pytest.mark.parametrize("field_name", ["github_app_id", "github_app_installation_id"])
-@pytest.mark.parametrize(
-    ("value", "error_type"),
-    [
-        ("0", "greater_than"),
-        ("-1", "greater_than"),
-        ("abc", "int_parsing"),
-        ("1.5", "int_parsing"),
-    ],
-)
-def test_github_app_id_that_is_not_a_positive_integer_is_refused(
-    required_environment, field_name, value, error_type
-):
-    """Zero, a negative, or a non-integer App ID or installation ID is refused."""
-    with pytest.raises(ValidationError) as excinfo:
-        Settings(**{field_name: value})
-
-    assert [(error["loc"], error["type"]) for error in excinfo.value.errors()] == [
-        ((field_name,), error_type)
-    ]
 
 
 def test_missing_required_option_raises_validation_error(
@@ -354,11 +231,6 @@ def test_resolved_options_reports_the_supplying_source_for_each_field(
     monkeypatch.setenv("GFZ_AGENT_USER", "env-agent")
     monkeypatch.setenv("GFZ_SSH_KEYS", "key-one")
     monkeypatch.setenv("GFZ_SSH_IDENTITY", "/home/admin/.ssh/id_ed25519")
-    monkeypatch.setenv("GFZ_HARNESS_REPO", "git@example.com:org/harness.git")
-    monkeypatch.setenv("GFZ_GIT_NAME", "Agent Example")
-    monkeypatch.setenv("GFZ_GIT_EMAIL", "agent@example.com")
-    monkeypatch.setenv("GFZ_GITHUB_APP_ID", "123456")
-    monkeypatch.setenv("GFZ_GITHUB_APP_INSTALLATION_ID", "7654321")
 
     config_file = tmp_path / "config.toml"
     config_file.write_text('region = "file-region"\n', encoding="utf-8")

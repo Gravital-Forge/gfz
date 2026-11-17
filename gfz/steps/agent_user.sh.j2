@@ -13,8 +13,6 @@ if ! grep -q "^{{ agent_user }}:" /etc/subuid /etc/subgid; then
   usermod --add-subgids "${start}-$((start + 65535))" "{{ agent_user }}"
 fi
 
-sudo -u "{{ agent_user }}" mkdir -p "{{ agent_home }}/Projects"
-
 install -d -m 0700 -o "{{ agent_user }}" -g "{{ agent_user }}" "{{ agent_home }}/.ssh"
 target="{{ agent_home }}/.ssh/authorized_keys"
 touch "$target"

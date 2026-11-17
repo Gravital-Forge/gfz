@@ -39,8 +39,6 @@ class Step:
     mandatory: bool
 
 
-CLONE_REPOS_SLUG = "clone-repos"
-
 STEPS: tuple[Step, ...] = (
     Step(
         slug="base-packages",
@@ -113,7 +111,7 @@ STEPS: tuple[Step, ...] = (
         login=Login.ROOT,
         forward_agent=False,
         template="agent_tooling.sh.j2",
-        summary="Install uv, poe, and the Claude Code CLI for the agent.",
+        summary="Install uv for the agent.",
         mandatory=True,
     ),
     Step(
@@ -137,7 +135,7 @@ STEPS: tuple[Step, ...] = (
         login=Login.ROOT,
         forward_agent=False,
         template="admin_node.sh.j2",
-        summary="Install nvm, Node 24, pnpm, and Claude Code for the admin.",
+        summary="Install nvm, Node 24, and pnpm for the admin.",
         mandatory=False,
     ),
     Step(
@@ -149,59 +147,11 @@ STEPS: tuple[Step, ...] = (
         mandatory=False,
     ),
     Step(
-        slug="clone-harness",
-        login=Login.ADMIN,
-        forward_agent=True,
-        template="clone_harness.sh.j2",
-        summary="Clone the harness repository into the agent's workspace.",
-        mandatory=True,
-    ),
-    Step(
-        slug=CLONE_REPOS_SLUG,
-        login=Login.ADMIN,
-        forward_agent=True,
-        template="clone_repos.sh.j2",
-        summary="Clone every configured repository into the work mount.",
-        mandatory=True,
-    ),
-    Step(
-        slug="minter-checkout",
-        login=Login.ADMIN,
-        forward_agent=True,
-        template="minter_checkout.sh.j2",
-        summary="Clone or fast-forward the admin's harness checkout.",
-        mandatory=True,
-    ),
-    Step(
-        slug="minter",
-        login=Login.ROOT,
-        forward_agent=False,
-        template="minter.sh.j2",
-        summary="Build the GitHub App minter image and run its container.",
-        mandatory=True,
-    ),
-    Step(
-        slug="minter-bearer",
-        login=Login.ROOT,
-        forward_agent=False,
-        template="minter_bearer.sh.j2",
-        summary="Create the agent's minter bearer file, once.",
-        mandatory=True,
-    ),
-    Step(
         slug="github-cli",
         login=Login.ROOT,
         forward_agent=False,
         template="github_cli.sh.j2",
         summary="Install the GitHub CLI from GitHub's apt repository.",
-        mandatory=True,
-    ),
-    Step(
-        slug="minter-client",
-        login=Login.ROOT,
-        forward_agent=False,
-        template="minter_client.sh.j2",
-        summary="Install the minter client; set the agent's git helper and identity.",
-        mandatory=True,
+        mandatory=False,
     ),
 )

@@ -22,7 +22,7 @@ TOKEN_VARIABLE = "DIGITALOCEAN_TOKEN"  # noqa: S105 — an env var name, not a s
 
 OptionSource = Literal["flag", "environment", "file", "default", "unset"]
 
-_UNSUPPLIED_ERROR_TYPES = frozenset({"missing", "too_short", "string_too_short"})
+_UNSUPPLIED_ERROR_TYPES = frozenset({"missing", "too_short"})
 
 
 def _config_path(*mappings: Mapping[str, object]) -> Path:
@@ -57,21 +57,15 @@ class Settings(BaseSettings):
     # characters, and fails a bad name on the operator's machine, not mid-run
     # on the droplet.
     agent_user: Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,31}$")]
-    git_name: Annotated[str, Field(min_length=1)]
-    git_email: Annotated[str, Field(min_length=1)]
     ssh_keys: Annotated[list[str], NoDecode, Field(min_length=1)]
     ssh_identity: Path
-    harness_repo: str
-    github_app_id: Annotated[int, Field(gt=0)]
-    github_app_installation_id: Annotated[int, Field(gt=0)]
-    repos: Annotated[list[str], NoDecode] = Field(default_factory=list)
     region: str = "tor1"
     size: str = "s-4vcpu-8gb"
     image: str = "ubuntu-24-04-x64"
     tag: str = "gfz"
     config: Path = DEFAULT_CONFIG_PATH
 
-    @field_validator("ssh_keys", "repos", mode="before")
+    @field_validator("ssh_keys", mode="before")
     @classmethod
     def _split_comma_separated(cls, value: object) -> object:
         """Split a comma-separated string into stripped, non-empty parts.
@@ -179,10 +173,9 @@ def configuration_error_message(error: ValidationError) -> str:
 
     A required option is unsupplied when no source supplies it, and equally when
     the winning source supplies nothing: `GFZ_SSH_KEYS=""` resolves to no keys at
-    all, and `GFZ_GIT_NAME=""` to an empty name. Either way the message names
-    that option's flag, its `GFZ_` environment variable, and its config key
-    together, since this is the only place a human sees all three names for the
-    same option.
+    all. Either way the message names that option's flag, its `GFZ_` environment
+    variable, and its config key together, since this is the only place a human
+    sees all three names for the same option.
     """
     lines = []
     for detail in error.errors():

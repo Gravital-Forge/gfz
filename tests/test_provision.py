@@ -1,7 +1,5 @@
 """Tests for gfz's provisioning engine: selection, rendering, and the run."""
 
-from pathlib import Path
-
 import jinja2
 import pytest
 
@@ -9,9 +7,8 @@ from gfz.commands import CommandError
 from gfz.provision import (
     RenderedStep,
     StepSelectionError,
-    clone_context,
+    closing_line,
     environment,
-    handoff_lines,
     provision_host,
     render_steps,
     select_steps,
@@ -52,82 +49,31 @@ class TestStepContext:
             "admin_home": f"/home/{settings.admin_user}",
             "agent_user": settings.agent_user,
             "agent_home": f"/home/{settings.agent_user}",
-            "workspace": f"/home/{settings.agent_user}/Projects/dev",
-            "harness_repo": settings.harness_repo,
-            "repos": list(settings.repos),
-            "harness_checkout": f"/home/{settings.admin_user}/harness",
-            "minter_container": "github-app-minter",
-            "github_app_id": settings.github_app_id,
-            "github_app_installation_id": settings.github_app_installation_id,
-            "git_name": settings.git_name,
-            "git_email": settings.git_email,
         }
 
-    def test_agent_home_and_workspace_follow_the_agent_user(self, settings):
-        """agent_home and workspace are derived from the agent user, not hardcoded."""
-        context = step_context(settings)
+    def test_agent_home_follows_the_agent_user(self, settings):
+        """agent_home is derived from the agent user, not hardcoded."""
+        renamed = settings.model_copy(update={"agent_user": "coder"})
 
-        assert settings.agent_user in context["agent_home"]
-        assert settings.agent_user in context["workspace"]
-
-
-class TestCloneContext:
-    """Tests for clone_context."""
-
-    def test_returns_step_context_with_only_repos_replaced(self, settings):
-        """clone_context matches step_context in every key but repos."""
-        base = step_context(settings)
-        cloned = clone_context(settings, "git@example.com:org/one.git")
-
-        assert set(cloned) == set(base)
-        assert {key for key in base if cloned[key] != base[key]} == {"repos"}
-
-    def test_repos_holds_exactly_the_one_repository_given(self, settings):
-        """Repos holds a single-element list carrying the given repository."""
-        context = clone_context(settings, "git@example.com:org/one.git")
-
-        assert context["repos"] == ["git@example.com:org/one.git"]
+        assert step_context(renamed)["agent_home"] == "/home/coder"
 
 
-class TestHandoffLines:
-    """Tests for handoff_lines."""
+class TestClosingLine:
+    """Tests for closing_line."""
 
-    def test_returns_the_key_load_then_the_claude_line(self, settings):
-        """The key load comes first, over ssh's stdin, and claude second.
+    @pytest.mark.parametrize("verb", ["created", "provisioned"])
+    def test_names_the_droplet_its_address_and_the_agent_user(self, settings, verb):
+        """The line names the droplet, its address, the verb, and the agent user."""
+        host = make_host(name="alpha", ip="203.0.113.10")
 
-        Both ssh lines carry gfz's own identity, as `gfz ssh` does.
-        """
-        lines = handoff_lines(settings, make_host(ip="203.0.113.10"))
-
-        identity = "/home/admin/.ssh/id_ed25519"
-        assert lines == (
-            "1. Load the GitHub App's private key from this machine, then delete"
-            " every copy of the key file:",
-            '   export APP_KEY_FILE="<path>"   # the App\'s private key file,'
-            " on this machine",
-            f"   ssh -i {identity} admin@203.0.113.10 sudo docker exec -i"
-            ' github-app-minter github-app-minter key set < "$APP_KEY_FILE"',
-            f"2. ssh -i {identity} agent@203.0.113.10, then run: claude",
+        assert closing_line(verb, host, settings) == (
+            f"droplet alpha (203.0.113.10) {verb} with agent user agent"
         )
-
-    def test_an_identity_path_holding_a_space_comes_out_quoted(self, settings):
-        """An identity path with a space reaches both ssh lines shell-quoted."""
-        spaced = settings.model_copy(
-            update={"ssh_identity": Path("/home/admin/my keys/id_ed25519")}
-        )
-
-        lines = handoff_lines(spaced, make_host(ip="203.0.113.10"))
-
-        quoted = "'/home/admin/my keys/id_ed25519'"
-        assert f"ssh -i {quoted} admin@203.0.113.10 " in lines[2]
-        assert lines[3] == f"2. ssh -i {quoted} agent@203.0.113.10, then run: claude"
 
     def test_a_host_with_no_address_raises_command_error(self, settings):
         """A host with ip=None raises CommandError, since it has no address."""
-        host = make_host(ip=None)
-
         with pytest.raises(CommandError):
-            handoff_lines(settings, host)
+            closing_line("created", make_host(ip=None), settings)
 
 
 class TestSelectSteps:

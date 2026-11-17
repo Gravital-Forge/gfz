@@ -16,13 +16,8 @@ from gfz.steps.registry import Login, Step
 REQUIRED_ENV = {
     "GFZ_ADMIN_USER": "admin",
     "GFZ_AGENT_USER": "agent",
-    "GFZ_GIT_NAME": "Agent Example",
-    "GFZ_GIT_EMAIL": "agent@example.com",
     "GFZ_SSH_KEYS": "key-one",
     "GFZ_SSH_IDENTITY": "/home/admin/.ssh/id_ed25519",
-    "GFZ_HARNESS_REPO": "git@github.com:example/harness.git",
-    "GFZ_GITHUB_APP_ID": "123456",
-    "GFZ_GITHUB_APP_INSTALLATION_ID": "7654321",
 }
 
 NEW_HOST_ID = 909
@@ -295,12 +290,5 @@ def reporter() -> RecordingReporter:
 
 @pytest.fixture
 def template_context(settings) -> dict[str, object]:
-    """The step context with one repository configured.
-
-    The repository makes clone-repos render its cloning branch, so every
-    context value that branch reads reaches the script.
-    """
-    return {
-        **step_context(settings),
-        "repos": ["git@github.com:example/project.git"],
-    }
+    """The context every core step template renders against."""
+    return step_context(settings)

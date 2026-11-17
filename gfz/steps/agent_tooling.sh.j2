@@ -3,10 +3,3 @@ set -euo pipefail
 if [ ! -x "{{ agent_home }}/.local/bin/uv" ]; then
   sudo -u "{{ agent_user }}" -i sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 fi
-
-sudo -u "{{ agent_user }}" -i bash -c \
-  '{{ agent_home }}/.local/bin/uv tool install poethepoet==0.48.0'
-
-if [ ! -x "{{ agent_home }}/.local/bin/claude" ]; then
-  sudo -u "{{ agent_user }}" -i bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-fi
