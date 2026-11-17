@@ -133,60 +133,74 @@ def run_order(plugins: Sequence[Plugin]) -> tuple[Step, ...]:
     return (*STEPS, *(step for plugin in plugins for step in plugin.steps))
 
 
-def _plugin_names(steps: Iterable[Step]) -> list[str]:
-    """Return each plugin that supplies one of `steps`, in run order."""
-    return list(dict.fromkeys(step.plugin for step in steps if step.plugin))
-
-
 def _selects(name: str, step: Step) -> bool:
     """Return whether `name` selects `step`: its own name, or its plugin's."""
     return name in (step.name, step.plugin)
 
 
-def _validate_names(steps: Sequence[Step], names: Iterable[str]) -> None:
+def _validate_names(
+    steps: Sequence[Step], plugin_names: Sequence[str], names: Iterable[str]
+) -> None:
     """Raise StepSelectionError naming every valid name if any name is unknown."""
-    plugins = _plugin_names(steps)
-    valid_names = {step.name for step in steps} | set(plugins)
+    valid_names = {step.name for step in steps} | set(plugin_names)
     for name in names:
         if name not in valid_names:
             message = (
                 f"unknown step {name!r}: valid steps are"
                 f" {', '.join(step.name for step in steps)}"
             )
-            if plugins:
-                message += f"; valid plugins are {', '.join(plugins)}"
+            if plugin_names:
+                message += f"; valid plugins are {', '.join(plugin_names)}"
             raise StepSelectionError(message)
 
 
+def _start_index(
+    steps: Sequence[Step], plugin_names: Sequence[str], start_from: str
+) -> int:
+    """Return the index in `steps` where a run that starts at `start_from` begins.
+
+    A plugin name starts the run at its place in the plugin order, so a plugin
+    with no steps starts it at the next plugin's first step.
+    """
+    if start_from in plugin_names:
+        onward = set(plugin_names[plugin_names.index(start_from) :])
+        return next(
+            (i for i, step in enumerate(steps) if step.plugin in onward), len(steps)
+        )
+    return next(i for i, step in enumerate(steps) if step.name == start_from)
+
+
 def select_steps(
-    steps: Sequence[Step],
+    plugins: Sequence[Plugin],
     *,
     only: Sequence[str] = (),
     start_from: str | None = None,
     skip: Sequence[str] = (),
 ) -> tuple[Step, ...]:
-    """Select steps from `steps`, keeping their order.
+    """Select steps from the run of core and `plugins`, keeping their run order.
 
     Each name is a step's name, or a bare plugin name that stands for every
-    step of that plugin. `only` keeps just the named steps. `start_from` drops
-    every step before the first one the name selects and keeps it onward. With
+    step of that plugin, which is none for a plugin with no steps. `only` keeps
+    just the named steps. `start_from` drops every step before the named step,
+    or before the named plugin's place in the run, and keeps the rest. With
     neither, every step is kept. `skip` then removes the named steps from that
     result.
 
     Raises:
         StepSelectionError: `only` and `start_from` are both given, or a
-            name selects no step in `steps`.
+            name is no step's name and no plugin's.
     """
     if only and start_from is not None:
         raise StepSelectionError("--only and --from cannot be combined")
+    steps = run_order(plugins)
+    plugin_names = [plugin.name for plugin in plugins]
     named = [*only, *skip] if start_from is None else [*only, *skip, start_from]
-    _validate_names(steps, named)
+    _validate_names(steps, plugin_names, named)
 
     if only:
         selected = [step for step in steps if any(_selects(n, step) for n in only)]
     elif start_from is not None:
-        index = next(i for i, step in enumerate(steps) if _selects(start_from, step))
-        selected = list(steps[index:])
+        selected = list(steps[_start_index(steps, plugin_names, start_from) :])
     else:
         selected = list(steps)
 

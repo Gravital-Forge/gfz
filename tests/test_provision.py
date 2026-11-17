@@ -73,6 +73,8 @@ summary = "The one step."
 
 INCLUDES_APT = 'set -euo pipefail\n{% include "_apt.j2" %}\napt_get update\n'
 
+NO_STEPS_MANIFEST = 'name = "empty"\nsummary = "A plugin with no steps."\n'
+
 
 class TestStepContext:
     """Tests for step_context."""
@@ -140,27 +142,27 @@ class TestSelectSteps:
 
     def test_no_selection_returns_every_step_unchanged(self):
         """With no selection, every step comes back, in run order."""
-        assert select_steps(RUN) == RUN
+        assert select_steps(PLUGINS) == RUN
 
     def test_only_returns_just_those_steps_in_run_order(self):
         """`only` keeps just the named steps, in run order, any input order."""
         names = ("hello/greet", STEPS[2].slug, STEPS[0].slug)
 
-        selected = select_steps(RUN, only=names)
+        selected = select_steps(PLUGINS, only=names)
 
         assert _names(selected) == [STEPS[0].slug, STEPS[2].slug, "hello/greet"]
 
     def test_only_a_plugin_name_selects_every_step_of_that_plugin(self):
         """A bare plugin name in `only` keeps all that plugin's steps."""
-        assert _names(select_steps(RUN, only=["claude"])) == CLAUDE_NAMES
+        assert _names(select_steps(PLUGINS, only=["claude"])) == CLAUDE_NAMES
 
     def test_only_a_plugin_step_name_selects_that_step_alone(self):
         """`<plugin>/<slug>` in `only` keeps that one step."""
-        assert _names(select_steps(RUN, only=["claude/agent"])) == ["claude/agent"]
+        assert _names(select_steps(PLUGINS, only=["claude/agent"])) == ["claude/agent"]
 
     def test_start_from_drops_steps_before_it_and_keeps_the_rest(self):
         """`start_from` drops every step before the named one and keeps it onward."""
-        selected = select_steps(RUN, start_from=STEPS[1].slug)
+        selected = select_steps(PLUGINS, start_from=STEPS[1].slug)
 
         assert selected == RUN[1:]
 
@@ -170,17 +172,17 @@ class TestSelectSteps:
     )
     def test_start_from_a_plugin_name_starts_at_its_first_step(self, plugin, expected):
         """`start_from` a bare plugin name starts at that plugin's first step."""
-        assert _names(select_steps(RUN, start_from=plugin)) == expected
+        assert _names(select_steps(PLUGINS, start_from=plugin)) == expected
 
     def test_skip_removes_that_step_and_keeps_the_others_in_order(self):
         """`skip` removes the named step, keeping the rest in run order."""
-        selected = select_steps(RUN, skip=[STEPS[1].slug])
+        selected = select_steps(PLUGINS, skip=[STEPS[1].slug])
 
         assert selected == (RUN[0], *RUN[2:])
 
     def test_skip_a_plugin_name_removes_every_step_of_that_plugin(self):
         """A bare plugin name in `skip` removes all that plugin's steps."""
-        assert _names(select_steps(RUN, skip=["hello"])) == [
+        assert _names(select_steps(PLUGINS, skip=["hello"])) == [
             *CORE_NAMES,
             *CLAUDE_NAMES,
         ]
@@ -188,7 +190,7 @@ class TestSelectSteps:
     def test_only_combined_with_start_from_raises(self):
         """`only` and `start_from` together raise StepSelectionError."""
         with pytest.raises(StepSelectionError):
-            select_steps(RUN, only=[STEPS[0].slug], start_from=STEPS[1].slug)
+            select_steps(PLUGINS, only=[STEPS[0].slug], start_from=STEPS[1].slug)
 
     @pytest.mark.parametrize(
         "selection",
@@ -202,7 +204,7 @@ class TestSelectSteps:
     def test_an_unknown_name_raises_naming_every_step_and_plugin(self, selection):
         """An unknown name raises, naming every valid step and every plugin."""
         with pytest.raises(StepSelectionError) as excinfo:
-            select_steps(RUN, **selection)
+            select_steps(PLUGINS, **selection)
 
         message = str(excinfo.value)
         assert "'no-such-step'" in message
@@ -212,20 +214,54 @@ class TestSelectSteps:
     def test_a_plugin_slug_without_its_plugin_is_unknown(self):
         """A plugin step's bare slug names nothing; its name carries the plugin."""
         with pytest.raises(StepSelectionError):
-            select_steps(RUN, only=["greet"])
+            select_steps(PLUGINS, only=["greet"])
 
     def test_combination_error_wins_over_unknown_name(self):
         """When both mistakes are present, the combination error wins."""
         with pytest.raises(StepSelectionError, match="cannot be combined"):
-            select_steps(RUN, only=["no-such-step"], start_from="also-no-such-step")
+            select_steps(PLUGINS, only=["no-such-step"], start_from="also-no-such-step")
 
     def test_only_plus_skip_of_the_same_name_returns_an_empty_tuple(self):
         """`only` naming a step that `skip` then removes returns an empty tuple."""
         slug = STEPS[0].slug
 
-        selected = select_steps(RUN, only=[slug], skip=[slug])
+        selected = select_steps(PLUGINS, only=[slug], skip=[slug])
 
         assert selected == ()
+
+
+class TestSelectStepsWithAPluginOfNoSteps:
+    """A plugin with no steps is still a name `only`, `skip`, and `start_from` take."""
+
+    @pytest.fixture
+    def plugins(self, tmp_path):
+        """Load claude, a plugin with no steps, then hello, in that order."""
+        empty = _write_plugin(tmp_path / "empty", NO_STEPS_MANIFEST, {})
+        return load_plugins(["claude", str(empty), str(EXAMPLE_DIR)])
+
+    def test_only_the_plugin_selects_nothing(self, plugins):
+        """`only` naming the plugin selects no step."""
+        assert select_steps(plugins, only=["empty"]) == ()
+
+    def test_skip_the_plugin_removes_nothing(self, plugins):
+        """`skip` naming the plugin keeps every step."""
+        assert select_steps(plugins, skip=["empty"]) == run_order(plugins)
+
+    def test_start_from_the_plugin_starts_at_its_place_in_the_run(self, plugins):
+        """`start_from` the plugin keeps the steps of every plugin listed after it."""
+        assert _names(select_steps(plugins, start_from="empty")) == HELLO_NAMES
+
+    def test_start_from_the_last_plugin_selects_nothing(self, tmp_path):
+        """`start_from` a plugin of no steps listed last selects no step."""
+        empty = _write_plugin(tmp_path / "empty", NO_STEPS_MANIFEST, {})
+        plugins = load_plugins(["claude", str(empty)])
+
+        assert select_steps(plugins, start_from="empty") == ()
+
+    def test_an_unknown_name_lists_the_plugin_among_the_valid_ones(self, plugins):
+        """The unknown-name error names the plugin of no steps as a valid plugin."""
+        with pytest.raises(StepSelectionError, match="valid plugins are claude, empty"):
+            select_steps(plugins, only=["no-such-step"])
 
 
 class TestPluginContexts:

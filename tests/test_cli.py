@@ -52,6 +52,16 @@ def _needy_plugin(tmp_path):
     return directory
 
 
+def _plugin_with_no_steps(tmp_path):
+    """Write a plugin named `empty` that declares no step."""
+    directory = tmp_path / "empty"
+    directory.mkdir()
+    (directory / "plugin.toml").write_text(
+        'name = "empty"\nsummary = "A plugin with no steps."\n', encoding="utf-8"
+    )
+    return directory
+
+
 def _no_client_call(fake):
     """Return whether a command made no call at all on the fake client."""
     return not (
@@ -856,6 +866,29 @@ def test_provision_refuses_a_plugin_before_any_digitalocean_call_or_ssh(
     assert "Traceback" not in result.stderr
     assert _no_client_call(fake)
     assert fake_runner.runs == []
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [(["--only", "empty"], []), (["--skip", "empty"], CORE_NAMES)],
+    ids=["only", "skip"],
+)
+def test_provision_takes_the_name_of_a_plugin_with_no_steps(
+    required_environment, monkeypatch, tmp_path, selection, expected
+):
+    """A plugin with no steps is a valid selection name, and selects nothing."""
+    directory = _plugin_with_no_steps(tmp_path)
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner()
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(
+        app, ["--plugin", str(directory), "provision", "alpha", *selection]
+    )
+
+    assert result.exit_code == 0
+    assert fake_runner.names == expected
 
 
 def test_provision_refuses_a_plugin_before_judging_the_selection(

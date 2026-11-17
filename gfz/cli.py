@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from gfz import commands, provision, remote
 from gfz.digitalocean import DigitalOceanClient, DigitalOceanError
 from gfz.hosts import ActionStatus, Host, PowerAction
-from gfz.plugin import PluginError, builtin_names, load_plugins
+from gfz.plugin import Plugin, PluginError, builtin_names, load_plugins
 from gfz.provision import ProvisionResult, StepContexts, StepSelectionError
 from gfz.settings import (
     PluginList,
@@ -153,10 +153,10 @@ def _reporting_failures() -> Iterator[None]:
         raise typer.Exit(code=1) from error
 
 
-def _planned_run(settings: Settings) -> tuple[tuple[Step, ...], StepContexts]:
+def _planned_run(settings: Settings) -> tuple[tuple[Plugin, ...], StepContexts]:
     """Load the configured plugins and resolve their settings.
 
-    Returns every step in run order, and the context each step renders against.
+    Returns the plugins in run order, and the context each step renders against.
 
     Raises:
         PluginError: A plugin fails to load, or its settings fail to resolve.
@@ -165,7 +165,7 @@ def _planned_run(settings: Settings) -> tuple[tuple[Step, ...], StepContexts]:
     contexts = provision.plugin_contexts(
         settings, plugins, os.environ, plugin_tables(settings.config)
     )
-    return provision.run_order(plugins), contexts
+    return plugins, contexts
 
 
 @config_app.command("show")
@@ -281,13 +281,13 @@ def create_command(
     """
     settings = _settings_or_exit(ctx)
     with _reporting_failures():
-        steps, contexts = _planned_run(settings)
+        plugins, contexts = _planned_run(settings)
         host = commands.create_host(
             DigitalOceanClient(), settings, name, report=_report_progress
         )
         typer.echo(_host_line(host))
         if not no_provision:
-            _run_provisioning(settings, host, steps, contexts)
+            _run_provisioning(settings, host, provision.run_order(plugins), contexts)
             typer.echo(provision.closing_line("created", host, settings))
 
 
@@ -386,7 +386,7 @@ def _steps_row(step: Step) -> tuple[str, ...]:
 
 
 def _selected_steps_or_exit(
-    steps: Sequence[Step],
+    plugins: Sequence[Plugin],
     *,
     only: Sequence[str],
     start_from: str | None,
@@ -404,7 +404,7 @@ def _selected_steps_or_exit(
     """
     try:
         return provision.select_steps(
-            steps, only=only, start_from=start_from, skip=skip
+            plugins, only=only, start_from=start_from, skip=skip
         )
     except StepSelectionError as error:
         typer.echo(str(error), err=True)
@@ -516,9 +516,9 @@ def provision_command(
     """
     settings = _settings_or_exit(ctx)
     with _reporting_failures():
-        run, contexts = _planned_run(settings)
+        plugins, contexts = _planned_run(settings)
     steps = _selected_steps_or_exit(
-        run, only=only or (), start_from=start_from, skip=skip or ()
+        plugins, only=only or (), start_from=start_from, skip=skip or ()
     )
     with _reporting_failures():
         host = commands.resolve_host(DigitalOceanClient(), name)
