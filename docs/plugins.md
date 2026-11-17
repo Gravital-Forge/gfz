@@ -105,8 +105,11 @@ A `list` setting is a list, so quoting it whole gives you nothing useful. Iterat
 each item:
 
 ```jinja
+{% include "_apt.j2" %}
 apt_get install -y{% for name in plugin.names %} {{ name | shell_quote }}{% endfor %}
 ```
+
+[Includes](#includes) says where `_apt.j2` comes from and what `apt_get` does.
 
 ### Includes
 
@@ -129,9 +132,9 @@ feeds the rendered script to `bash -s` on the droplet. A `root` step that acts f
 the command through `sudo -u {{ agent_user }}`, as `examples/hello` does. The admin account has
 passwordless sudo.
 
-A script that exits zero succeeded. When a mandatory step fails, `gfz` stops the run and prints the
-step's name and what it wrote to stderr. When an optional step fails, the run carries on and the
-end-of-run summary names the step. `gfz` does not show a script's stdout.
+A script that exits zero succeeded, and any other exit fails the step. The step's `mandatory` key
+decides what a failure does, as the README's [`gfz provision`](../README.md#gfz-provision-name)
+section describes. `gfz` does not show a script's stdout.
 
 `forward_agent = true` forwards your local ssh agent into the session, which a step needs to reach a
 private repository over ssh with your keys. Leave it off for any step that does not need it: a
@@ -204,8 +207,8 @@ A bare plugin name stands for every step of that plugin:
 - `--from <plugin>` starts at the plugin's place in the run, which is its first step.
 
 A plugin with no steps is still a valid name. It selects no step under `--only` and drops none under
-`--skip`. Under `--from` it starts the run at the next plugin's first step, or runs nothing when no
-plugin follows it.
+`--skip`. Under `--from` it starts the run at the first step of any plugin after it, or runs nothing
+when none of them has a step.
 
 A name that matches no step and no plugin is a usage error. `gfz` lists every valid step name and
 every plugin name, and exits 2.

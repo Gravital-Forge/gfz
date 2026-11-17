@@ -24,10 +24,9 @@ shell on it. The other provisions it, running an ordered sequence of shell scrip
 `gfz steps` prints that sequence and `gfz provision` runs it.
 
 The sequence starts with core: the steps every droplet gets. Core assumes a stock image and installs
-what it needs, starting with `ca-certificates`, `curl`, and `git`. It installs Docker, creates the
-admin and the agent accounts, gives the agent a rootless Docker daemon of its own, and installs uv,
-nvm, Node 24, and pnpm for the agent. A few optional steps follow: tmux and htop, Node for the
-admin, the packages a headless browser needs, and the GitHub CLI.
+everything it needs. It installs Docker, creates the admin and the agent accounts, and gives the
+agent a rootless Docker daemon of its own and a toolchain to build with. Some optional extras
+follow. `gfz steps` prints the live list, with what each step does.
 
 Root's ssh keys carry over to both accounts, so the key that created the droplet reaches either one.
 
@@ -62,10 +61,10 @@ run after core, in the same engine, and every step command treats them the same 
 optional `claude/admin` step installs it for the admin. `gfz plugins` lists every plugin that ships
 with `gfz`.
 
-The `plugins` option chooses which plugins run, in order. Each entry is a built-in name, or a path
-to a plugin directory that is absolute or starts with `~`. Setting `plugins` from any source
-replaces the default, so list `claude` too if you want to keep it. To run your own plugin after
-`claude`, put this in your config file:
+The `plugins` option chooses which plugins run, in order. Each entry names a built-in plugin or a
+plugin directory. [Choosing plugins](docs/plugins.md#choosing-plugins) gives the forms an entry
+takes. Setting `plugins` from any source replaces the default, so list `claude` too if you want to
+keep it. To run your own plugin after `claude`, put this in your config file:
 
 ```toml
 plugins = ["claude", "~/gfz-plugins/hello"]
@@ -104,7 +103,7 @@ rest. The environment is the least bad place for a value this sensitive to live.
 
 ### The scopes the token needs
 
-A custom-scoped DigitalOcean token needs seven scopes:
+A custom-scoped DigitalOcean token needs these scopes:
 
 - `droplet:create` — `gfz create` makes the droplet.
 - `droplet:read` — `gfz list` prints droplets, and every command that takes a name finds one.
@@ -227,9 +226,9 @@ empty.
 Creates one droplet with the configured region, size, image, SSH keys, and tag. Monitoring is on.
 Backups and IPv6 are off.
 
-Before it makes any DigitalOcean call, `create` loads every plugin, resolves every plugin setting,
-and renders every step's script. A broken manifest, a missing setting, or a template that does not
-render is an error that names its cause, and no droplet is created.
+`create` checks every plugin before it makes any DigitalOcean call, so a plugin it cannot use
+creates no droplet. [When gfz checks a plugin](docs/plugins.md#when-gfz-checks-a-plugin) says what
+that check covers.
 
 `create` then waits, up to 300 seconds, for the droplet to become active, to get a public IPv4
 address, and to accept a TCP connection on port 22. On timeout, `gfz` reports the droplet's ID and
@@ -237,7 +236,7 @@ any address it has, and exits non-zero. It never deletes the droplet: a slow boo
 throw one away.
 
 Once the droplet answers ssh, `create` provisions it, running every core and plugin step. It prints
-the run summary, then one closing line:
+the droplet's state line, then the run summary, then one closing line:
 
 ```text
 droplet alpha (203.0.113.10) created with agent user agent
@@ -270,9 +269,8 @@ Prints each plugin that ships with `gfz`, with its summary. It needs no option.
 ### `gfz provision <name>`
 
 Renders the selected steps against the resolved configuration, then runs each one over ssh on the
-named droplet. Each step reports as it starts and again as it finishes. Like `create`, it loads
-every plugin, resolves every plugin setting, and renders every selected step before it looks up the
-droplet, so a plugin it cannot use opens no ssh session.
+named droplet. Each step reports as it starts and again as it finishes. Like `create`, it checks
+every plugin before it looks up the droplet, so a plugin it cannot use opens no ssh session.
 
 A freshly created droplet is still running its first-boot package upgrade when provisioning starts,
 and that upgrade holds the package lock. Every core apt call waits up to ten minutes for the lock,
@@ -291,19 +289,18 @@ and the run still exits zero.
 
 These flags select and preview:
 
-- `--only <name>` runs that step alone. Repeat it for more than one.
-- `--from <name>` starts at that step and runs every step after it. It cannot be combined with
+- `--only <name>` runs only the steps that name selects. Repeat it for more than one.
+- `--from <name>` starts at that name and runs every step after it. It cannot be combined with
   `--only`.
-- `--skip <name>` drops that step from whatever the other flags selected. Repeat it for more.
+- `--skip <name>` drops the steps that name selects from whatever the other flags selected. Repeat
+  it for more.
 - `--dry-run` prints the rendered scripts and opens no connection. It still resolves the droplet
   through the API, so what it prints is what would have run.
 
-A core step's name is its slug, such as `docker-engine`. A plugin step's name is `<plugin>/<slug>`,
-such as `claude/agent`. A bare plugin name stands for all of that plugin's steps: `--only claude`
-runs both `claude` steps, and `--from claude` starts at the first of them.
-
-A name matching no step and no plugin is a usage error. `gfz` lists the names it does know and exits
-2.
+Each `<name>` is a step name, as `gfz steps` prints it, or a plugin name, which stands for every
+step of that plugin: `--only claude` runs every `claude` step.
+[Step names and selection](docs/plugins.md#step-names-and-selection) gives the naming rules, and
+what `gfz` does with a name that matches nothing.
 
 A finished run, other than a dry run, prints the run summary and then one closing line:
 
@@ -355,13 +352,6 @@ Opens an interactive shell on the droplet as the admin user. `--agent` opens it 
 instead.
 
 `gfz ssh` uses the configured identity file, and the real `ssh` binary found on `PATH`.
-
-## Non-goals
-
-`gfz` does not:
-
-- Support a second cloud provider.
-- Manage snapshots, volumes, reserved IPs, firewalls, DNS, or backups.
 
 ## Working on gfz
 
