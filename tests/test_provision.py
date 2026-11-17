@@ -161,6 +161,15 @@ class TestRenderSteps:
             assert "{{" not in item.script
             assert "{%" not in item.script
 
+    @pytest.mark.parametrize(
+        ("value", "quoted"), [(8080, "8080"), ("it's", "'it'\"'\"'s'")]
+    )
+    def test_shell_quote_quotes_the_text_of_any_value(self, value, quoted):
+        """shell_quote turns an integer setting into text before quoting it."""
+        template = environment.from_string("{{ value | shell_quote }}")
+
+        assert template.render(value=value) == quoted
+
     def test_environment_uses_strict_undefined(self):
         """The template environment raises on a variable the context lacks."""
         assert environment.undefined is jinja2.StrictUndefined

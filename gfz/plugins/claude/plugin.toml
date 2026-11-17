@@ -1,0 +1,13 @@
+name = "claude"
+summary = "Install Claude Code for the agent and the admin."
+
+[[steps]]
+slug = "agent"
+script = "agent.sh.j2"
+summary = "Install Claude Code for the agent."
+
+[[steps]]
+slug = "admin"
+script = "admin.sh.j2"
+summary = "Install Claude Code for the admin."
+mandatory = false

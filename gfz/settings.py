@@ -1,6 +1,7 @@
 """The gfz configuration surface: sources, precedence, and provenance."""
 
 import os
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,10 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
+from gfz.plugin import PluginError
+
 DEFAULT_CONFIG_PATH = Path("~/.config/gfz/config.toml")
+PLUGIN_TABLE_KEY = "plugin"
 TOKEN_VARIABLE = "DIGITALOCEAN_TOKEN"  # noqa: S105 — an env var name, not a secret
 
 OptionSource = Literal["flag", "environment", "file", "default", "unset"]
@@ -34,17 +38,49 @@ def _config_path(*mappings: Mapping[str, object]) -> Path:
 
 
 class _ConfigFileSource(TomlConfigSettingsSource):
-    """The config file's values, less any attempt to relocate the config file.
+    """The config file's values, less the keys that are not options.
 
     A file that set `config` would make `config show` report a path other than the
-    one it read.
+    one it read. The `plugin` table holds plugin settings, which `plugin_tables`
+    reads apart from the options.
     """
 
     def __call__(self) -> dict[str, object]:
-        """Return the file's values, with any `config` key removed."""
+        """Return the file's values, less any `config` key and `plugin` table."""
         values = super().__call__()
         values.pop("config", None)
+        values.pop(PLUGIN_TABLE_KEY, None)
         return values
+
+
+def _split_comma_separated(value: object) -> object:
+    """Split a comma-separated string into stripped, non-empty parts.
+
+    A TOML array or a repeated flag arrives as a list already and passes through
+    untouched.
+    """
+    if not isinstance(value, str):
+        return value
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _ordered_sources(
+    settings_cls: type[BaseSettings],
+    init_settings: PydanticBaseSettingsSource,
+    env_settings: PydanticBaseSettingsSource,
+) -> tuple[PydanticBaseSettingsSource, ...]:
+    """Order sources as flag, then environment, then config file, then default."""
+    config_path = _config_path(init_settings(), env_settings())
+    return (
+        init_settings,
+        env_settings,
+        _ConfigFileSource(settings_cls, toml_file=config_path),
+    )
+
+
+def _default_plugins() -> list[str]:
+    """Return the plugin list that applies when no source sets `plugins`."""
+    return ["claude"]
 
 
 class Settings(BaseSettings):
@@ -63,18 +99,12 @@ class Settings(BaseSettings):
     size: str = "s-4vcpu-8gb"
     image: str = "ubuntu-24-04-x64"
     tag: str = "gfz"
+    plugins: Annotated[list[str], NoDecode] = Field(default_factory=_default_plugins)
     config: Path = DEFAULT_CONFIG_PATH
 
-    @field_validator("ssh_keys", mode="before")
-    @classmethod
-    def _split_comma_separated(cls, value: object) -> object:
-        """Split a comma-separated string into stripped, non-empty parts.
-
-        A TOML array arrives as a list already and passes through untouched.
-        """
-        if not isinstance(value, str):
-            return value
-        return [part.strip() for part in value.split(",") if part.strip()]
+    _split_lists = field_validator("ssh_keys", "plugins", mode="before")(
+        _split_comma_separated
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -86,12 +116,60 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Order sources as flag, then environment, then config file, then default."""
-        config_path = _config_path(init_settings(), env_settings())
-        return (
-            init_settings,
-            env_settings,
-            _ConfigFileSource(settings_cls, toml_file=config_path),
+        return _ordered_sources(settings_cls, init_settings, env_settings)
+
+
+class PluginList(BaseSettings):
+    """The plugin list alone, for the commands that need no other option.
+
+    It reads the same sources in the same order as Settings, and ignores every
+    other option those sources carry.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="GFZ_", extra="ignore")
+
+    plugins: Annotated[list[str], NoDecode] = Field(default_factory=_default_plugins)
+    config: Path = DEFAULT_CONFIG_PATH
+
+    _split_lists = field_validator("plugins", mode="before")(_split_comma_separated)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type["PluginList"],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Order sources as flag, then environment, then config file, then default."""
+        return _ordered_sources(settings_cls, init_settings, env_settings)
+
+
+def plugin_tables(config_path: Path) -> dict[str, Mapping[str, object]]:
+    """Return the config file's `[plugin.<name>]` tables, keyed by plugin name.
+
+    A missing file, or a file with no `plugin` table, gives an empty mapping.
+
+    Raises:
+        PluginError: The file's `plugin` key, or an entry under it, is not a
+            table.
+    """
+    if not config_path.is_file():
+        return {}
+    with config_path.open("rb") as config_file:
+        tables = tomllib.load(config_file).get(PLUGIN_TABLE_KEY, {})
+    if not isinstance(tables, dict):
+        raise PluginError(
+            f"{config_path}: {PLUGIN_TABLE_KEY} must be a table, got {tables!r}"
         )
+    for name, table in tables.items():
+        if not isinstance(table, dict):
+            raise PluginError(
+                f"{config_path}: {PLUGIN_TABLE_KEY}.{name} must be a table,"
+                f" got {table!r}"
+            )
+    return tables
 
 
 @dataclass(frozen=True)

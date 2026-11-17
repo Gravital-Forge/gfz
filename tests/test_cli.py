@@ -51,9 +51,40 @@ def test_show_with_required_env_exits_zero_and_lists_every_option(required_envir
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
-    expected_names = ("admin_user", "agent_user", "ssh_keys", "ssh_identity", "region")
+    table = _parsed_table(result.stdout)
+    expected_names = (
+        "admin_user",
+        "agent_user",
+        "ssh_keys",
+        "ssh_identity",
+        "region",
+        "plugins",
+    )
     for name in (*expected_names, "DIGITALOCEAN_TOKEN"):
-        assert name in result.stdout
+        assert name in table
+
+
+def test_the_plugins_row_shows_the_default_entry(required_environment):
+    """With nothing supplying plugins, the row shows the claude built-in by default."""
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert _parsed_table(result.stdout)["plugins"] == ("claude", "default")
+
+
+def test_the_plugins_row_shows_the_environments_entries(
+    required_environment, monkeypatch
+):
+    """GFZ_PLUGINS entries show in the plugins row with source 'environment'."""
+    monkeypatch.setenv("GFZ_PLUGINS", "claude,/opt/hello")
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert _parsed_table(result.stdout)["plugins"] == (
+        "claude, /opt/hello",
+        "environment",
+    )
 
 
 def test_flag_beats_environment_in_the_printed_table(required_environment, monkeypatch):

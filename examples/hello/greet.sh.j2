@@ -1,0 +1,4 @@
+set -euo pipefail
+
+printf '%s\n' {{ plugin.greeting | shell_quote }} \
+  | sudo -u "{{ agent_user }}" tee "{{ agent_home }}/hello.txt" >/dev/null

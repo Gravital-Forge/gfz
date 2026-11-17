@@ -3,12 +3,138 @@
 import pytest
 from pydantic import ValidationError
 
+from gfz.plugin import PluginError
 from gfz.settings import (
     TOKEN_VARIABLE,
+    PluginList,
     Settings,
     configuration_error_message,
+    plugin_tables,
     resolved_options,
 )
+
+
+def _config_file(monkeypatch, tmp_path, text):
+    """Write `text` as the config file and point GFZ_CONFIG at it."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("GFZ_CONFIG", str(config_file))
+    return config_file
+
+
+def test_plugins_defaults_to_the_claude_built_in(required_environment):
+    """With nothing supplying plugins, the claude built-in is the one plugin."""
+    assert Settings().plugins == ["claude"]
+
+
+def test_plugins_environment_variable_is_comma_separated(
+    required_environment, monkeypatch
+):
+    """GFZ_PLUGINS splits on commas into stripped, non-empty entries."""
+    monkeypatch.setenv("GFZ_PLUGINS", "claude, ~/plugins/hello,,")
+
+    assert Settings().plugins == ["claude", "~/plugins/hello"]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('plugins = ["/opt/gfz/hello", "claude"]', ["/opt/gfz/hello", "claude"]),
+        ("plugins = []", []),
+    ],
+    ids=["entries", "core-only"],
+)
+def test_plugins_from_the_config_file_replaces_the_default(
+    required_environment, monkeypatch, tmp_path, line, expected
+):
+    """A config file plugins list replaces the default, and an empty one means none."""
+    _config_file(monkeypatch, tmp_path, f"{line}\n")
+
+    assert Settings().plugins == expected
+
+
+def test_a_plugin_table_in_the_config_file_is_not_a_setting(
+    required_environment, monkeypatch, tmp_path
+):
+    """A [plugin.<name>] table resolves without error and adds no option row."""
+    _config_file(monkeypatch, tmp_path, '[plugin.hello]\ngreeting = "hi"\n')
+
+    settings = Settings()
+    names = {option.name for option in resolved_options(settings, {})}
+
+    assert "plugin" not in names
+    assert "plugins" in names
+
+
+def test_plugin_list_resolves_with_no_required_option_supplied(monkeypatch, tmp_path):
+    """PluginList needs none of Settings' required options, and ignores other keys."""
+    _config_file(
+        monkeypatch,
+        tmp_path,
+        'admin_user = "admin"\nplugins = ["claude", "/opt/hello"]\n'
+        '[plugin.hello]\ngreeting = "hi"\n',
+    )
+
+    plugin_list = PluginList(region="nyc3")
+
+    assert plugin_list.plugins == ["claude", "/opt/hello"]
+
+
+def test_plugin_list_takes_the_flag_over_the_environment(monkeypatch):
+    """PluginList orders its sources as Settings does: flag before environment."""
+    monkeypatch.setenv("GFZ_PLUGINS", "claude")
+
+    assert PluginList(plugins=["/opt/hello"]).plugins == ["/opt/hello"]
+
+
+def test_plugin_list_defaults_to_the_claude_built_in():
+    """With nothing supplying plugins, PluginList holds the claude built-in."""
+    assert PluginList().plugins == ["claude"]
+
+
+def test_plugin_tables_returns_the_config_files_plugin_tables(tmp_path):
+    """plugin_tables returns each [plugin.<name>] table keyed by plugin name."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        'region = "tor1"\n[plugin.hello]\ngreeting = "hi"\n[plugin.other]\n',
+        encoding="utf-8",
+    )
+
+    assert plugin_tables(config_file) == {"hello": {"greeting": "hi"}, "other": {}}
+
+
+@pytest.mark.parametrize(
+    "text", [None, 'region = "tor1"\n'], ids=["no-file", "no-table"]
+)
+def test_plugin_tables_is_empty_without_a_plugin_table(tmp_path, text):
+    """A missing config file, or one with no plugin table, gives no tables."""
+    config_file = tmp_path / "config.toml"
+    if text is not None:
+        config_file.write_text(text, encoding="utf-8")
+
+    assert plugin_tables(config_file) == {}
+
+
+@pytest.mark.parametrize(
+    ("text", "fragment"),
+    [
+        ("plugin = 5\n", "plugin must be a table"),
+        ('[plugin]\nhello = "hi"\n', "plugin.hello must be a table"),
+    ],
+    ids=["plugin-not-a-table", "entry-not-a-table"],
+)
+def test_plugin_tables_refuses_a_plugin_key_that_is_not_tables(
+    tmp_path, text, fragment
+):
+    """A plugin key, or an entry under it, that is not a table raises PluginError."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(text, encoding="utf-8")
+
+    with pytest.raises(PluginError) as excinfo:
+        plugin_tables(config_file)
+
+    assert fragment in str(excinfo.value)
+    assert str(config_file) in str(excinfo.value)
 
 
 def test_flag_beats_environment_and_file_for_same_option(

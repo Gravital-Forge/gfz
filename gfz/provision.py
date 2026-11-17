@@ -21,7 +21,7 @@ environment = Environment(
     lstrip_blocks=True,
     autoescape=False,  # noqa: S701 — these render shell; HTML escaping corrupts it
 )
-environment.filters["shell_quote"] = shlex.quote
+environment.filters["shell_quote"] = lambda value: shlex.quote(str(value))
 
 StepStatus = Literal["ok", "warned", "failed"]
 

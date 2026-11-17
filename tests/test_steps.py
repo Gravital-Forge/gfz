@@ -9,6 +9,7 @@ from jinja2 import meta
 
 from gfz.provision import environment
 from gfz.steps.registry import STEPS, STEPS_DIR, Login
+from tests.conftest import make_step
 
 PARAMETRIZE_STEPS = pytest.mark.parametrize("step", STEPS, ids=lambda step: step.slug)
 
@@ -49,6 +50,21 @@ def test_every_core_step_runs_as_root_and_forwards_no_agent():
 def test_only_the_four_named_steps_are_optional():
     """The admin tools, the admin's Node, the browser packages, and gh may fail."""
     assert {step.slug for step in STEPS if not step.mandatory} == OPTIONAL_SLUGS
+
+
+def test_a_core_step_is_named_by_its_slug_and_renders_from_the_steps_directory():
+    """A core step has no plugin, its name is its slug, and its root is STEPS_DIR."""
+    for step in STEPS:
+        assert step.plugin is None, step.slug
+        assert step.name == step.slug
+        assert step.directory == STEPS_DIR, step.slug
+
+
+def test_a_plugin_step_is_named_by_its_plugin_and_slug(tmp_path):
+    """A plugin step's name is `<plugin>/<slug>`."""
+    step = make_step(slug="greet", plugin="hello", directory=tmp_path)
+
+    assert step.name == "hello/greet"
 
 
 def test_the_tooling_summaries_name_only_what_the_steps_install():

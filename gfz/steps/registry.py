@@ -19,16 +19,19 @@ class Step:
     """One provisioning step: a script, the account that runs it, and its policy.
 
     Attributes:
-        slug: The step's name on the command line and in every line gfz
-            prints about it.
+        slug: The step's name within its source: core or one plugin.
         login: The account the script runs as.
         forward_agent: Whether the ssh session forwards the operator's local
             agent, which a step reaching a private repository needs.
-        template: The template's file name under STEPS_DIR. File names carry
-            underscores where the slug carries hyphens.
+        template: The template's posix path relative to `directory`. Core file
+            names carry underscores where the slug carries hyphens.
         summary: One line saying what the step does, printed by `gfz steps`.
         mandatory: Whether a failure stops the run. An optional step's
             failure only warns.
+        plugin: The name of the plugin that supplies the step, or `None` for
+            a core step.
+        directory: The template root: STEPS_DIR for a core step, the plugin's
+            directory for a plugin step.
     """
 
     slug: str
@@ -37,6 +40,18 @@ class Step:
     template: str
     summary: str
     mandatory: bool
+    plugin: str | None = None
+    directory: Path = STEPS_DIR
+
+    @property
+    def name(self) -> str:
+        """The step's name on the command line and in every line gfz prints.
+
+        A core step's name is its slug; a plugin step's is `<plugin>/<slug>`.
+        """
+        if self.plugin is None:
+            return self.slug
+        return f"{self.plugin}/{self.slug}"
 
 
 STEPS: tuple[Step, ...] = (
