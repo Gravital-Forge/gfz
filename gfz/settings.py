@@ -251,10 +251,10 @@ def _plugin_setting_options(
 def resolved_options(
     settings: Settings, overrides: Mapping[str, object]
 ) -> list[ResolvedOption]:
-    """Return one ResolvedOption per Settings field, then a token row, in that order.
+    """Return a row per Settings field, a row per plugin setting, then a token row.
 
-    The `plugins` row shows each entry as the directory it resolves to, and one
-    row per plugin setting follows it.
+    The `plugins` row shows each entry as the directory it resolves to, and the
+    plugin setting rows follow it.
 
     The token row reports only whether `DIGITALOCEAN_TOKEN` is set in the
     environment; the variable's actual value never appears in the returned data.
