@@ -2,7 +2,7 @@
 
 import os
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -18,7 +18,13 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from gfz.plugin import PluginError, split_comma_separated
+from gfz.plugin import (
+    Plugin,
+    PluginError,
+    load_plugins,
+    resolve_settings,
+    split_comma_separated,
+)
 
 DEFAULT_CONFIG_PATH = Path("~/.config/gfz/config.toml")
 PLUGIN_TABLE_KEY = "plugin"
@@ -219,23 +225,59 @@ def _field_sources(overrides: Mapping[str, object]) -> dict[str, OptionSource]:
     return sources
 
 
+def _plugin_setting_options(
+    plugins: Sequence[Plugin], config_path: Path
+) -> list[ResolvedOption]:
+    """Return one ResolvedOption per plugin setting, named `<plugin>.<setting>`.
+
+    Raises:
+        PluginError: A plugin's settings fail to resolve.
+    """
+    tables = plugin_tables(config_path)
+    options = []
+    for plugin in plugins:
+        resolved = resolve_settings(plugin, os.environ, tables.get(plugin.name, {}))
+        options += [
+            ResolvedOption(
+                name=f"{plugin.name}.{setting}",
+                value=_render_value(value),
+                source=resolved.sources[setting],
+            )
+            for setting, value in resolved.values.items()
+        ]
+    return options
+
+
 def resolved_options(
     settings: Settings, overrides: Mapping[str, object]
 ) -> list[ResolvedOption]:
     """Return one ResolvedOption per Settings field, then a token row, in that order.
 
+    The `plugins` row shows each entry as the directory it resolves to, and one
+    row per plugin setting follows it.
+
     The token row reports only whether `DIGITALOCEAN_TOKEN` is set in the
     environment; the variable's actual value never appears in the returned data.
+
+    Raises:
+        PluginError: A plugin fails to load, or its settings fail to resolve.
     """
     sources = _field_sources(overrides)
-    options = [
-        ResolvedOption(
-            name=field_name,
-            value=_render_value(getattr(settings, field_name)),
-            source=sources[field_name],
-        )
-        for field_name in Settings.model_fields
-    ]
+    plugins = load_plugins(settings.plugins)
+    options = []
+    for field_name in Settings.model_fields:
+        if field_name == "plugins":
+            directories = ", ".join(str(plugin.directory) for plugin in plugins)
+            options.append(ResolvedOption(field_name, directories, sources[field_name]))
+            options += _plugin_setting_options(plugins, settings.config)
+        else:
+            options.append(
+                ResolvedOption(
+                    name=field_name,
+                    value=_render_value(getattr(settings, field_name)),
+                    source=sources[field_name],
+                )
+            )
 
     token_is_set = bool(os.environ.get(TOKEN_VARIABLE))
     options.append(

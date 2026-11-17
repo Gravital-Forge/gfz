@@ -12,8 +12,11 @@ import gfz.provision
 import gfz.remote
 from gfz.cli import app
 from gfz.digitalocean import DigitalOceanError
+from gfz.plugin import BUILTIN_DIR, load_plugins
+from gfz.provision import run_order
 from gfz.steps.registry import STEPS
 from tests.conftest import (
+    EXAMPLE_DIR,
     NEW_HOST_ID,
     REMOTE_FAILURE_STDERR,
     FakeHostClient,
@@ -23,6 +26,41 @@ from tests.conftest import (
 )
 
 runner = CliRunner()
+
+# With nothing setting `plugins`, a run is core then the claude built-in.
+DEFAULT_RUN = run_order(load_plugins(["claude"]))
+DEFAULT_NAMES = [step.name for step in DEFAULT_RUN]
+CORE_NAMES = [step.slug for step in STEPS]
+CLAUDE_NAMES = ["claude/agent", "claude/admin"]
+HELLO_NAMES = ["hello/greet"]
+BOTH_PLUGINS = ["--plugin", "claude", "--plugin", str(EXAMPLE_DIR)]
+
+REQUIRED_SETTING_MANIFEST = """\
+name = "needy"
+summary = "A plugin with a required setting."
+
+[settings.token_name]
+type = "string"
+"""
+
+
+def _needy_plugin(tmp_path):
+    """Write a plugin whose one setting is required and has no default."""
+    directory = tmp_path / "needy"
+    directory.mkdir()
+    (directory / "plugin.toml").write_text(REQUIRED_SETTING_MANIFEST, encoding="utf-8")
+    return directory
+
+
+def _no_client_call(fake):
+    """Return whether a command made no call at all on the fake client."""
+    return not (
+        fake.create_calls
+        or fake.get_calls
+        or fake.list_calls
+        or fake.delete_calls
+        or fake.power_calls
+    )
 
 
 def _parsed_table(rendered: str) -> dict[str, tuple[str, str]]:
@@ -64,27 +102,138 @@ def test_show_with_required_env_exits_zero_and_lists_every_option(required_envir
         assert name in table
 
 
-def test_the_plugins_row_shows_the_default_entry(required_environment):
-    """With nothing supplying plugins, the row shows the claude built-in by default."""
+def test_the_plugins_row_shows_the_default_built_ins_directory(required_environment):
+    """With nothing supplying plugins, the row shows the claude built-in's directory."""
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
-    assert _parsed_table(result.stdout)["plugins"] == ("claude", "default")
+    assert _parsed_table(result.stdout)["plugins"] == (
+        str(BUILTIN_DIR / "claude"),
+        "default",
+    )
 
 
-def test_the_plugins_row_shows_the_environments_entries(
+def test_the_plugins_row_shows_each_entrys_resolved_directory(
     required_environment, monkeypatch
 ):
-    """GFZ_PLUGINS entries show in the plugins row with source 'environment'."""
-    monkeypatch.setenv("GFZ_PLUGINS", "claude,/opt/hello")
+    """GFZ_PLUGINS entries show as their directories, with source 'environment'."""
+    monkeypatch.setenv("GFZ_PLUGINS", f"claude,{EXAMPLE_DIR}")
 
     result = runner.invoke(app, ["config", "show"])
 
     assert result.exit_code == 0
     assert _parsed_table(result.stdout)["plugins"] == (
-        "claude, /opt/hello",
+        f"{BUILTIN_DIR / 'claude'}, {EXAMPLE_DIR}",
         "environment",
     )
+
+
+def test_a_tilde_plugin_entry_shows_as_its_expanded_directory(
+    required_environment, monkeypatch, tmp_path
+):
+    """An entry starting with `~` shows as the absolute directory it expands to."""
+    shutil.copytree(EXAMPLE_DIR, tmp_path / "home" / "hello")
+    monkeypatch.setenv("GFZ_PLUGINS", "~/hello")
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert _parsed_table(result.stdout)["plugins"] == (
+        str(tmp_path / "home" / "hello"),
+        "environment",
+    )
+
+
+def test_the_plugin_flag_repeats_and_reports_source_flag(required_environment):
+    """`--plugin` given twice lists both plugins, with source 'flag'."""
+    result = runner.invoke(app, [*BOTH_PLUGINS, "config", "show"])
+
+    assert result.exit_code == 0
+    assert _parsed_table(result.stdout)["plugins"] == (
+        f"{BUILTIN_DIR / 'claude'}, {EXAMPLE_DIR}",
+        "flag",
+    )
+
+
+HELLO_TABLE = '[plugin.hello]\ngreeting = "from the file"\n'
+
+
+@pytest.mark.parametrize(
+    ("variable", "file_text", "expected"),
+    [
+        (None, "", ("hello", "default")),
+        (None, HELLO_TABLE, ("from the file", "file")),
+        ("from env", HELLO_TABLE, ("from env", "environment")),
+    ],
+    ids=["default", "file", "environment"],
+)
+def test_a_plugin_setting_row_names_its_value_and_source(
+    required_environment, monkeypatch, tmp_path, variable, file_text, expected
+):
+    """Each plugin setting shows as `<plugin>.<setting>`, with its value and source."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(file_text, encoding="utf-8")
+    monkeypatch.setenv("GFZ_CONFIG", str(config_file))
+    if variable is not None:
+        monkeypatch.setenv("GFZ_PLUGIN_HELLO_GREETING", variable)
+
+    result = runner.invoke(app, [*BOTH_PLUGINS, "config", "show"])
+
+    assert result.exit_code == 0
+    assert _parsed_table(result.stdout)["hello.greeting"] == expected
+
+
+def test_the_plugin_setting_rows_follow_the_plugins_row(required_environment):
+    """Plugin setting rows come straight after the plugins row."""
+    result = runner.invoke(app, [*BOTH_PLUGINS, "config", "show"])
+
+    names = list(_parsed_table(result.stdout))
+    assert names[names.index("plugins") + 1] == "hello.greeting"
+
+
+def test_a_table_for_a_plugin_not_listed_is_ignored(
+    required_environment, monkeypatch, tmp_path
+):
+    """A [plugin.<name>] table for an unlisted plugin is neither read nor shown."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[plugin.absent]\nanything = 1\n", encoding="utf-8")
+    monkeypatch.setenv("GFZ_CONFIG", str(config_file))
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 0
+    assert not any(name.startswith("absent.") for name in _parsed_table(result.stdout))
+
+
+UNUSABLE_PLUGINS = pytest.mark.parametrize(
+    ("make_entry", "message"),
+    [
+        (
+            lambda tmp_path: str(tmp_path / "nowhere"),
+            "is not a directory holding plugin.toml",
+        ),
+        (
+            lambda tmp_path: str(_needy_plugin(tmp_path)),
+            "GFZ_PLUGIN_NEEDY_TOKEN_NAME",
+        ),
+    ],
+    ids=["missing-directory", "required-setting"],
+)
+
+
+@UNUSABLE_PLUGINS
+def test_config_show_refuses_a_plugin_it_cannot_use(
+    required_environment, monkeypatch, tmp_path, make_entry, message
+):
+    """A plugin that fails to load or resolve exits 1, naming what failed."""
+    monkeypatch.setenv("GFZ_PLUGINS", make_entry(tmp_path))
+
+    result = runner.invoke(app, ["config", "show"])
+
+    assert result.exit_code == 1
+    assert message in result.stderr
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
 
 
 def test_flag_beats_environment_in_the_printed_table(required_environment, monkeypatch):
@@ -526,23 +675,61 @@ def test_digitalocean_error_prints_its_message_and_exits_nonzero_without_traceba
     assert result.stdout == ""
 
 
-def test_steps_prints_a_header_and_one_row_per_registered_step(required_environment):
-    """`steps` exits 0 and prints a header row plus one row per registered step."""
+def test_steps_prints_every_step_in_run_order_with_its_source():
+    """`steps` lists core, claude, and hello steps, each naming its source.
+
+    It runs with no required option supplied, as it needs none.
+    """
+    result = runner.invoke(app, [*BOTH_PLUGINS, "steps"])
+
+    assert result.exit_code == 0
+    rows = [re.split(r"\s{2,}", line.strip()) for line in result.stdout.splitlines()]
+    assert rows[0] == ["step", "source", "login", "policy", "summary"]
+    run = run_order(load_plugins(["claude", str(EXAMPLE_DIR)]))
+    assert [row[0] for row in rows[1:]] == [*CORE_NAMES, *CLAUDE_NAMES, *HELLO_NAMES]
+    for step, row in zip(run, rows[1:], strict=True):
+        policy = "mandatory" if step.mandatory else "optional"
+        source = step.plugin or "core"
+        assert row == [step.name, source, step.login.value, policy, step.summary]
+
+
+def test_steps_with_no_plugins_lists_core_alone(monkeypatch):
+    """`plugins = []` lists only the core steps."""
+    monkeypatch.setenv("GFZ_PLUGINS", "")
+
     result = runner.invoke(app, ["steps"])
 
     assert result.exit_code == 0
-    lines = result.stdout.splitlines()
-    assert re.split(r"\s{2,}", lines[0].strip()) == [
-        "step",
-        "login",
-        "policy",
-        "summary",
+    assert [line.split()[0] for line in result.stdout.splitlines()[1:]] == CORE_NAMES
+
+
+def test_steps_resolves_no_plugin_setting(tmp_path):
+    """`steps` loads a plugin with a required setting, and asks for no value."""
+    result = runner.invoke(app, ["--plugin", str(_needy_plugin(tmp_path)), "steps"])
+
+    assert result.exit_code == 0
+    assert "GFZ_PLUGIN_NEEDY" not in result.stderr
+
+
+def test_steps_refuses_a_plugin_that_fails_to_load():
+    """A plugin entry that does not load exits 1 and prints no table."""
+    result = runner.invoke(app, ["--plugin", "nonesuch", "steps"])
+
+    assert result.exit_code == 1
+    assert "unknown built-in plugin 'nonesuch'" in result.stderr
+    assert result.stdout == ""
+
+
+def test_plugins_lists_each_built_in_with_its_summary():
+    """`plugins` prints a name and summary row per built-in, needing no option."""
+    result = runner.invoke(app, ["plugins"])
+
+    assert result.exit_code == 0
+    rows = [re.split(r"\s{2,}", line.strip()) for line in result.stdout.splitlines()]
+    assert rows == [
+        ["name", "summary"],
+        ["claude", "Install Claude Code for the agent and the admin."],
     ]
-    assert len(lines) == 1 + len(STEPS)
-    for step, line in zip(STEPS, lines[1:], strict=True):
-        assert step.slug in line
-        assert step.login.value in line
-        assert step.summary in line
 
 
 PROVISIONED_LINE = "droplet alpha (203.0.113.10) provisioned with agent user agent"
@@ -569,10 +756,28 @@ def test_provision_dry_run_prints_every_step_script_and_no_closing_line(
     result = runner.invoke(app, ["provision", "alpha", "--dry-run"])
 
     assert result.exit_code == 0
-    assert result.stdout.count("set -euo pipefail") == len(STEPS)
-    for step in STEPS:
-        assert f"# {step.slug} ({step.login.value})" in result.stdout
+    assert result.stdout.count("set -euo pipefail") == len(DEFAULT_RUN)
+    for step in DEFAULT_RUN:
+        assert f"# {step.name} ({step.login.value})" in result.stdout
     assert "provisioned with agent user" not in result.stdout
+
+
+def test_provision_dry_run_renders_a_plugin_step_with_its_setting(
+    required_environment, monkeypatch
+):
+    """--dry-run prints the hello step under its name, with the greeting setting."""
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    monkeypatch.setenv("GFZ_PLUGIN_HELLO_GREETING", "good day")
+
+    result = runner.invoke(
+        app,
+        [*BOTH_PLUGINS, "provision", "alpha", "--dry-run", "--only", "hello"],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("# hello/greet (root)\n")
+    assert "'good day'" in result.stdout
 
 
 def test_provision_dry_run_against_a_host_with_no_address_exits_1(
@@ -603,8 +808,66 @@ def test_provision_runs_every_registered_step_and_prints_the_summary(
     result = runner.invoke(app, ["provision", "alpha"])
 
     assert result.exit_code == 0
-    assert f"{len(STEPS)} steps ran, all succeeded" in result.stdout
-    assert fake_runner.slugs == [step.slug for step in STEPS]
+    assert f"{len(DEFAULT_RUN)} steps ran, all succeeded" in result.stdout
+    assert fake_runner.names == DEFAULT_NAMES
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [
+        (["--only", "claude"], CLAUDE_NAMES),
+        (["--only", "claude/agent"], ["claude/agent"]),
+        (["--skip", "hello"], [*CORE_NAMES, *CLAUDE_NAMES]),
+        (["--from", "hello"], HELLO_NAMES),
+    ],
+    ids=["only-plugin", "only-plugin-step", "skip-plugin", "from-plugin"],
+)
+def test_provision_selects_plugin_steps_by_name_and_by_plugin(
+    required_environment, monkeypatch, selection, expected
+):
+    """--only, --skip, and --from take a plugin step's name or a bare plugin name."""
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner()
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(app, [*BOTH_PLUGINS, "provision", "alpha", *selection])
+
+    assert result.exit_code == 0
+    assert fake_runner.names == expected
+
+
+@UNUSABLE_PLUGINS
+def test_provision_refuses_a_plugin_before_any_digitalocean_call_or_ssh(
+    required_environment, monkeypatch, tmp_path, make_entry, message
+):
+    """A plugin that fails to load or resolve exits 1 before reaching the droplet."""
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner()
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(
+        app, ["--plugin", make_entry(tmp_path), "provision", "alpha"]
+    )
+
+    assert result.exit_code == 1
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+    assert _no_client_call(fake)
+    assert fake_runner.runs == []
+
+
+def test_provision_refuses_a_plugin_before_judging_the_selection(
+    required_environment,
+):
+    """A plugin failure exits 1 even when the selection also names no step."""
+    result = runner.invoke(
+        app, ["--plugin", "nonesuch", "provision", "alpha", "--only", "nonesuch"]
+    )
+
+    assert result.exit_code == 1
+    assert "unknown built-in plugin" in result.stderr
 
 
 def test_provision_ends_with_the_summary_then_the_closing_line(
@@ -620,7 +883,7 @@ def test_provision_ends_with_the_summary_then_the_closing_line(
 
     assert result.exit_code == 0
     assert result.stdout.splitlines() == [
-        f"{len(STEPS)} steps ran, all succeeded",
+        f"{len(DEFAULT_RUN)} steps ran, all succeeded",
         PROVISIONED_LINE,
     ]
 
@@ -670,7 +933,37 @@ def test_provision_stops_on_a_mandatory_step_failure(required_environment, monke
     assert result.exit_code == 1
     assert failing_slug in result.stderr
     assert REMOTE_FAILURE_STDERR in result.stderr
-    assert fake_runner.slugs == [failing_slug]
+    assert fake_runner.names == [failing_slug]
+
+
+def test_a_failing_plugin_step_is_named_in_the_failure_line(
+    required_environment, monkeypatch
+):
+    """A mandatory plugin step's failure names it as `<plugin>/<slug>`."""
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner(failures={"claude/agent": 3})
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(app, ["provision", "alpha"])
+
+    assert result.exit_code == 1
+    assert "provisioning stopped at claude/agent; remote stderr:" in result.stderr
+
+
+def test_a_failing_optional_plugin_step_is_named_in_the_summary(
+    required_environment, monkeypatch
+):
+    """An optional plugin step's failure shows in the summary under its name."""
+    fake = FakeHostClient(hosts=[make_host()])
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+    fake_runner = FakeScriptRunner(failures={"claude/admin": 5})
+    monkeypatch.setattr(gfz.remote, "ssh_runner", lambda settings, host: fake_runner)
+
+    result = runner.invoke(app, ["provision", "alpha"])
+
+    assert result.exit_code == 0
+    assert "  claude/admin: exit 5" in result.stdout
 
 
 def test_provision_with_an_optional_step_failure_still_exits_zero(
@@ -686,6 +979,7 @@ def test_provision_with_an_optional_step_failure_still_exits_zero(
         ),
     )
     monkeypatch.setattr(gfz.provision, "STEPS", steps)
+    monkeypatch.setenv("GFZ_PLUGINS", "")
     fake = FakeHostClient(hosts=[make_host()])
     monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
     fake_runner = FakeScriptRunner(failures={"optional-thing": 5})
@@ -696,7 +990,7 @@ def test_provision_with_an_optional_step_failure_still_exits_zero(
     assert result.exit_code == 0
     assert "optional-thing" in result.stdout
     assert "exit 5" in result.stdout
-    assert fake_runner.slugs == ["base-packages", "optional-thing"]
+    assert fake_runner.names == ["base-packages", "optional-thing"]
 
 
 def test_provision_with_a_registered_optional_step_failure_exits_zero(
@@ -712,18 +1006,21 @@ def test_provision_with_a_registered_optional_step_failure_exits_zero(
 
     assert result.exit_code == 0
     assert "admin-tools: exit 5" in result.stdout
-    assert fake_runner.slugs == [step.slug for step in STEPS]
+    assert fake_runner.names == DEFAULT_NAMES
 
 
-def test_provision_only_unknown_step_exits_2_and_names_valid_slugs(
+def test_provision_only_unknown_step_exits_2_and_names_every_valid_name(
     required_environment,
 ):
-    """--only naming an unknown step exits 2 and the message names every valid slug."""
-    result = runner.invoke(app, ["provision", "alpha", "--only", "nonesuch"])
+    """--only naming an unknown step exits 2, naming every step and plugin."""
+    result = runner.invoke(
+        app, [*BOTH_PLUGINS, "provision", "alpha", "--only", "nonesuch"]
+    )
 
     assert result.exit_code == 2
-    for step in STEPS:
-        assert step.slug in result.stderr
+    for name in [*CORE_NAMES, *CLAUDE_NAMES, *HELLO_NAMES]:
+        assert name in result.stderr
+    assert "valid plugins are claude, hello" in result.stderr
 
 
 def test_provision_only_and_from_together_exits_2(required_environment):
@@ -751,7 +1048,7 @@ def test_provision_only_combined_with_skip_runs_the_narrowed_selection(
     )
 
     assert result.exit_code == 0
-    assert fake_runner.slugs == ["base-packages"]
+    assert fake_runner.names == ["base-packages"]
 
 
 def test_provision_from_runs_that_step_and_every_step_after_it(
@@ -766,7 +1063,7 @@ def test_provision_from_runs_that_step_and_every_step_after_it(
     result = runner.invoke(app, ["provision", "alpha", "--from", "docker-repo"])
 
     assert result.exit_code == 0
-    assert fake_runner.slugs == [step.slug for step in STEPS[1:]]
+    assert fake_runner.names == DEFAULT_NAMES[1:]
 
 
 def test_provision_progress_lines_go_to_stderr_not_stdout(
@@ -802,7 +1099,24 @@ def test_create_provisions_after_the_wait_by_default(
     result = runner.invoke(app, ["create", "alpha"])
 
     assert result.exit_code == 0
-    assert fake_runner.slugs == [step.slug for step in STEPS]
+    assert fake_runner.names == DEFAULT_NAMES
+
+
+@UNUSABLE_PLUGINS
+def test_create_refuses_a_plugin_before_any_digitalocean_call(
+    required_environment, monkeypatch, fake_clock, tmp_path, make_entry, message
+):
+    """A plugin that fails to load or resolve exits 1 and creates no droplet."""
+    fake = FakeHostClient()
+    monkeypatch.setattr(cli, "DigitalOceanClient", lambda: fake)
+
+    result = runner.invoke(app, ["--plugin", make_entry(tmp_path), "create", "alpha"])
+
+    assert result.exit_code == 1
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert _no_client_call(fake)
 
 
 def test_create_progress_lines_go_to_stderr_not_stdout(
@@ -825,7 +1139,7 @@ def test_create_progress_lines_go_to_stderr_not_stdout(
     assert "ssh answers on 203.0.113.10" not in result.stdout
     assert "alpha" in result.stdout
     assert "203.0.113.10" in result.stdout
-    assert f"{len(STEPS)} steps ran, all succeeded" in result.stdout
+    assert f"{len(DEFAULT_RUN)} steps ran, all succeeded" in result.stdout
 
 
 def test_create_ends_with_the_summary_then_the_closing_line(
@@ -843,7 +1157,7 @@ def test_create_ends_with_the_summary_then_the_closing_line(
 
     assert result.exit_code == 0
     assert result.stdout.splitlines()[-2:] == [
-        f"{len(STEPS)} steps ran, all succeeded",
+        f"{len(DEFAULT_RUN)} steps ran, all succeeded",
         CREATED_LINE,
     ]
 

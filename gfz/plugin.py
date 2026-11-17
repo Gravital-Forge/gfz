@@ -292,8 +292,9 @@ def load_plugins(entries: Sequence[str]) -> tuple[Plugin, ...]:
 
     Raises:
         PluginError: An entry fails to resolve or load, two entries name one
-            directory, two plugins share a name, or a plugin's name is a core
-            step's slug, which would make a bare name in `--only` ambiguous.
+            directory, two plugins share a name, a plugin's name is a core
+            step's slug, which would make a bare name in `--only` ambiguous, or
+            two plugin settings map to one environment variable.
     """
     core_slugs = {step.slug for step in STEPS}
     entries_by_directory: dict[Path, str] = {}
@@ -324,7 +325,31 @@ def load_plugins(entries: Sequence[str]) -> tuple[Plugin, ...]:
         directories_by_name[plugin.name] = directory
         plugins.append(plugin)
 
+    _refuse_shared_variables(plugins)
     return tuple(plugins)
+
+
+def _refuse_shared_variables(plugins: Sequence[Plugin]) -> None:
+    """Refuse two plugin settings that one environment variable would set.
+
+    A hyphen in a name and an underscore in a setting both become `_` in the
+    variable, so plugin `a` setting `b_c` and plugin `a-b` setting `c` both read
+    `GFZ_PLUGIN_A_B_C`.
+
+    Raises:
+        PluginError: Two settings map to one variable.
+    """
+    owners: dict[str, str] = {}
+    for plugin in plugins:
+        for setting in plugin.settings:
+            variable = setting_variable(plugin.name, setting)
+            owner = f"{plugin.name}.{setting}"
+            if variable in owners:
+                raise PluginError(
+                    f"{owners[variable]} and {owner} are both set by {variable};"
+                    " rename a setting or a plugin so each variable means one thing"
+                )
+            owners[variable] = owner
 
 
 def setting_variable(plugin_name: str, setting: str) -> str:

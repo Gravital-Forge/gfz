@@ -1,6 +1,7 @@
 """The gfz command line: argument parsing and output rendering only."""
 
-from collections.abc import Iterator, Mapping, Sequence
+import os
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Annotated
 
@@ -10,9 +11,16 @@ from pydantic import ValidationError
 from gfz import commands, provision, remote
 from gfz.digitalocean import DigitalOceanClient, DigitalOceanError
 from gfz.hosts import ActionStatus, Host, PowerAction
-from gfz.provision import ProvisionResult, StepSelectionError
-from gfz.settings import Settings, configuration_error_message, resolved_options
-from gfz.steps.registry import STEPS, Step
+from gfz.plugin import PluginError, builtin_names, load_plugins
+from gfz.provision import ProvisionResult, StepContexts, StepSelectionError
+from gfz.settings import (
+    PluginList,
+    Settings,
+    configuration_error_message,
+    plugin_tables,
+    resolved_options,
+)
+from gfz.steps.registry import Step
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -54,6 +62,16 @@ def main(
     tag: Annotated[
         str | None, typer.Option(help="The tag applied to a droplet gfz creates.")
     ] = None,
+    plugin: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--plugin",
+            help=(
+                "A plugin whose steps run after core: a built-in name, or a path"
+                " that is absolute or starts with ~. Repeat for more."
+            ),
+        ),
+    ] = None,
     config: Annotated[
         str | None, typer.Option(help="Path to gfz's TOML config file.")
     ] = None,
@@ -72,6 +90,7 @@ def main(
         "size": size,
         "image": image,
         "tag": tag,
+        "plugins": plugin or None,
         "config": config,
     }
     ctx.obj = {name: value for name, value in overrides.items() if value is not None}
@@ -104,29 +123,58 @@ def _settings_or_exit(ctx: typer.Context) -> Settings:
         raise typer.Exit(code=2) from error
 
 
+def _plugin_list_or_exit(ctx: typer.Context) -> PluginList:
+    """Resolve the plugin list alone from the parent callback's overrides.
+
+    Raises:
+        typer.Exit: Exit code 2, after printing the validation failure to
+            stderr, when the plugin list or the config path is invalid.
+    """
+    try:
+        return PluginList(**ctx.obj)
+    except ValidationError as error:
+        typer.echo(configuration_error_message(error), err=True)
+        raise typer.Exit(code=2) from error
+
+
 @contextmanager
 def _reporting_failures() -> Iterator[None]:
-    """Catch a CommandError or DigitalOceanError, print it, and exit 1.
+    """Catch a CommandError, DigitalOceanError, or PluginError, print it, exit 1.
 
-    These are the only two failure types this CLI catches: every provider
-    failure already arrives as a DigitalOceanError, and every command refusal
-    as a CommandError. Neither prints a traceback.
+    These are the only failure types this CLI catches: every provider failure
+    already arrives as a DigitalOceanError, every command refusal as a
+    CommandError, and every plugin it cannot use as a PluginError. None prints
+    a traceback.
     """
     try:
         yield
-    except (commands.CommandError, DigitalOceanError) as error:
+    except (commands.CommandError, DigitalOceanError, PluginError) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
+
+
+def _planned_run(settings: Settings) -> tuple[tuple[Step, ...], StepContexts]:
+    """Load the configured plugins and resolve their settings.
+
+    Returns every step in run order, and the context each step renders against.
+
+    Raises:
+        PluginError: A plugin fails to load, or its settings fail to resolve.
+    """
+    plugins = load_plugins(settings.plugins)
+    contexts = provision.plugin_contexts(
+        settings, plugins, os.environ, plugin_tables(settings.config)
+    )
+    return provision.run_order(plugins), contexts
 
 
 @config_app.command("show")
 def show(ctx: typer.Context) -> None:
     """Print every resolved option with the source that supplied it."""
     settings = _settings_or_exit(ctx)
-    rows = [
-        (option.name, option.value, option.source)
-        for option in resolved_options(settings, ctx.obj)
-    ]
+    with _reporting_failures():
+        options = resolved_options(settings, ctx.obj)
+    rows = [(option.name, option.value, option.source) for option in options]
     typer.echo(_aligned_table(("option", "value", "source"), rows))
 
 
@@ -226,16 +274,20 @@ def create_command(
         ),
     ] = False,
 ) -> None:
-    """Create a droplet carrying the configured tag, wait for ssh, then provision it."""
+    """Create a droplet carrying the configured tag, wait for ssh, then provision it.
+
+    Every plugin loads and every plugin setting resolves first, so a plugin gfz
+    cannot use creates no droplet.
+    """
     settings = _settings_or_exit(ctx)
     with _reporting_failures():
+        steps, contexts = _planned_run(settings)
         host = commands.create_host(
             DigitalOceanClient(), settings, name, report=_report_progress
         )
         typer.echo(_host_line(host))
         if not no_provision:
-            context = provision.step_context(settings)
-            _run_provisioning(settings, host, provision.select_steps(), context)
+            _run_provisioning(settings, host, steps, contexts)
             typer.echo(provision.closing_line("created", host, settings))
 
 
@@ -322,17 +374,23 @@ def ssh_command_entry(
     raise typer.Exit(code=exit_code)
 
 
-STEPS_HEADER = ("step", "login", "policy", "summary")
+STEPS_HEADER = ("step", "source", "login", "policy", "summary")
+PLUGINS_HEADER = ("name", "summary")
 
 
 def _steps_row(step: Step) -> tuple[str, ...]:
-    """Render one registered step as a row of the `steps` table."""
+    """Render one step as a row of the `steps` table, naming its source."""
     policy = "mandatory" if step.mandatory else "optional"
-    return (step.slug, step.login.value, policy, step.summary)
+    source = step.plugin if step.plugin is not None else "core"
+    return (step.name, source, step.login.value, policy, step.summary)
 
 
 def _selected_steps_or_exit(
-    *, only: Sequence[str], start_from: str | None, skip: Sequence[str]
+    steps: Sequence[Step],
+    *,
+    only: Sequence[str],
+    start_from: str | None,
+    skip: Sequence[str],
 ) -> tuple[Step, ...]:
     """Select the steps to run, exiting 2 on a selection mistake.
 
@@ -345,7 +403,9 @@ def _selected_steps_or_exit(
             stderr.
     """
     try:
-        return provision.select_steps(only=only, start_from=start_from, skip=skip)
+        return provision.select_steps(
+            steps, only=only, start_from=start_from, skip=skip
+        )
     except StepSelectionError as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
@@ -354,7 +414,7 @@ def _selected_steps_or_exit(
 def _dry_run_output(rendered: Sequence[provision.RenderedStep]) -> str:
     """Render every selected step's script under a header naming the step."""
     blocks = [
-        f"# {item.step.slug} ({item.step.login.value})\n{item.script}"
+        f"# {item.step.name} ({item.step.login.value})\n{item.script}"
         for item in rendered
     ]
     return "\n".join(blocks)
@@ -372,7 +432,7 @@ def _provision_summary(result: ProvisionResult) -> str:
     if not warned:
         return f"{ran} ran, all succeeded"
     lines = [f"{ran} ran, {_plural(len(warned), 'optional step')} failed:"]
-    lines += [f"  {outcome.slug}: exit {outcome.exit_code}" for outcome in warned]
+    lines += [f"  {outcome.name}: exit {outcome.exit_code}" for outcome in warned]
     return "\n".join(lines)
 
 
@@ -380,18 +440,18 @@ def _run_provisioning(
     settings: Settings,
     host: Host,
     steps: Sequence[Step],
-    context: Mapping[str, object],
+    contexts: StepContexts,
 ) -> None:
-    """Run `steps` on `host` against `context`, then print the result.
+    """Run `steps` on `host`, each against its plugin's context, then print the result.
 
     Progress lines go to stderr, keeping stdout the data channel for the
     run summary this prints once it finishes.
 
     Raises:
-        typer.Exit: Exit code 1, after printing the failing step's slug and
+        typer.Exit: Exit code 1, after printing the failing step's name and
             the remote stderr, when a mandatory step failed.
     """
-    rendered = provision.render_steps(steps, context)
+    rendered = provision.render_steps(steps, contexts)
     runner = remote.ssh_runner(settings, host)
     result = provision.provision_host(rendered, runner, _report_progress)
 
@@ -400,16 +460,32 @@ def _run_provisioning(
         return
 
     failure = result.outcomes[-1]
-    typer.echo(f"provisioning stopped at {failure.slug}; remote stderr:", err=True)
+    typer.echo(f"provisioning stopped at {failure.name}; remote stderr:", err=True)
     typer.echo(failure.stderr, err=True)
     raise typer.Exit(code=1)
 
 
 @app.command("steps")
-def steps_command() -> None:
-    """Print the provisioning steps in the order `provision` runs them."""
-    rows = [_steps_row(step) for step in STEPS]
+def steps_command(ctx: typer.Context) -> None:
+    """Print every core and plugin step in the order `provision` runs them.
+
+    It resolves only the plugin list and loads each plugin's manifest, so it
+    needs no other option and resolves no plugin setting.
+    """
+    plugin_list = _plugin_list_or_exit(ctx)
+    with _reporting_failures():
+        plugins = load_plugins(plugin_list.plugins)
+    rows = [_steps_row(step) for step in provision.run_order(plugins)]
     typer.echo(_aligned_table(STEPS_HEADER, rows))
+
+
+@app.command("plugins")
+def plugins_command() -> None:
+    """Print each plugin that ships with gfz, with its summary."""
+    with _reporting_failures():
+        builtins = load_plugins(builtin_names())
+    rows = [(plugin.name, plugin.summary) for plugin in builtins]
+    typer.echo(_aligned_table(PLUGINS_HEADER, rows))
 
 
 @app.command("provision")
@@ -433,18 +509,23 @@ def provision_command(
         typer.Option("--dry-run", help="Print the rendered scripts and run nothing."),
     ] = False,
 ) -> None:
-    """Run the provisioning steps on a droplet."""
+    """Run the core and plugin steps on a droplet.
+
+    Every plugin loads and every plugin setting resolves before gfz looks up
+    the droplet, so a plugin gfz cannot use opens no ssh session.
+    """
     settings = _settings_or_exit(ctx)
+    with _reporting_failures():
+        run, contexts = _planned_run(settings)
     steps = _selected_steps_or_exit(
-        only=only or (), start_from=start_from, skip=skip or ()
+        run, only=only or (), start_from=start_from, skip=skip or ()
     )
     with _reporting_failures():
         host = commands.resolve_host(DigitalOceanClient(), name)
         # Refuse a host with no address before --dry-run prints any script.
         commands.host_address(host)
-        context = provision.step_context(settings)
         if dry_run:
-            typer.echo(_dry_run_output(provision.render_steps(steps, context)))
+            typer.echo(_dry_run_output(provision.render_steps(steps, contexts)))
         else:
-            _run_provisioning(settings, host, steps, context)
+            _run_provisioning(settings, host, steps, contexts)
             typer.echo(provision.closing_line("provisioned", host, settings))

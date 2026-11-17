@@ -16,8 +16,7 @@ from gfz.plugin import (
     setting_variable,
 )
 from gfz.steps.registry import Login
-
-EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "hello"
+from tests.conftest import EXAMPLE_DIR
 
 MINIMAL_MANIFEST = """\
 name = "probe"
@@ -451,6 +450,27 @@ class TestLoadPlugins:
 
         assert "'github-cli'" in str(excinfo.value)
         assert "core step" in str(excinfo.value)
+
+    def test_two_settings_that_map_to_one_variable_are_refused(self, tmp_path):
+        """Plugin `a` setting `b_c` and plugin `a-b` setting `c` share a variable."""
+        first = _write_plugin(
+            tmp_path / "first",
+            'name = "a"\nsummary = "A."\n[settings.b_c]\ntype = "string"\n',
+            scripts=(),
+        )
+        second = _write_plugin(
+            tmp_path / "second",
+            'name = "a-b"\nsummary = "A-b."\n[settings.c]\ntype = "string"\n',
+            scripts=(),
+        )
+
+        with pytest.raises(PluginError) as excinfo:
+            load_plugins([str(first), str(second)])
+
+        message = str(excinfo.value)
+        assert "GFZ_PLUGIN_A_B_C" in message
+        assert "a.b_c" in message
+        assert "a-b.c" in message
 
 
 @pytest.mark.parametrize(

@@ -1,29 +1,26 @@
-"""The provisioning engine: render the step registry and run it on a host."""
+"""The provisioning engine: order, select, render, and run core and plugin steps."""
 
+import functools
 import shlex
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from gfz.commands import host_address
 from gfz.hosts import Host
+from gfz.plugin import Plugin, resolve_settings
 from gfz.remote import ScriptRunner
 from gfz.settings import Settings
 from gfz.steps.registry import STEPS, STEPS_DIR, Step
 
-environment = Environment(
-    loader=FileSystemLoader(STEPS_DIR),
-    undefined=StrictUndefined,
-    keep_trailing_newline=True,
-    trim_blocks=True,
-    lstrip_blocks=True,
-    autoescape=False,  # noqa: S701 — these render shell; HTML escaping corrupts it
-)
-environment.filters["shell_quote"] = lambda value: shlex.quote(str(value))
-
 StepStatus = Literal["ok", "warned", "failed"]
+
+# Keyed by a step's `plugin`: None for core, else the plugin's name.
+StepContexts = Mapping[str | None, Mapping[str, object]]
 
 ClosingVerb = Literal["created", "provisioned"]
 
@@ -45,7 +42,7 @@ class StepOutcome:
     """What one step's run produced.
 
     Attributes:
-        slug: The step's slug.
+        name: The step's name.
         status: `"ok"` when the script exited zero. `"warned"` when an
             optional step failed and the run continued. `"failed"` when a
             mandatory step failed and the run stopped.
@@ -53,7 +50,7 @@ class StepOutcome:
         stderr: Everything the script wrote to stderr.
     """
 
-    slug: str
+    name: str
     status: StepStatus
     exit_code: int
     stderr: str
@@ -65,7 +62,7 @@ class ProvisionResult:
 
     Attributes:
         outcomes: One StepOutcome per step that ran, in run order.
-        aborted_at: The slug of the mandatory step that stopped the run, or
+        aborted_at: The name of the mandatory step that stopped the run, or
             `None` when every selected step ran.
     """
 
@@ -81,6 +78,32 @@ def step_context(settings: Settings) -> dict[str, object]:
         "agent_user": settings.agent_user,
         "agent_home": _agent_home(settings),
     }
+
+
+def plugin_contexts(
+    settings: Settings,
+    plugins: Sequence[Plugin],
+    environ: Mapping[str, str],
+    table: Mapping[str, Mapping[str, object]],
+) -> dict[str | None, Mapping[str, object]]:
+    """Return the context each step renders against, keyed by the step's plugin.
+
+    Core steps, under `None`, see the core values alone. Each plugin sees the
+    core values plus `plugin`, its resolved settings. `table` is the config
+    file's whole `plugin` table; each plugin reads only its own entry.
+
+    `plugin` is a namespace, not a dict, so a setting named `items` or `keys`
+    reaches the template instead of a dict method.
+
+    Raises:
+        PluginError: A plugin's settings fail to resolve.
+    """
+    core = step_context(settings)
+    contexts: dict[str | None, Mapping[str, object]] = {None: core}
+    for plugin in plugins:
+        resolved = resolve_settings(plugin, environ, table.get(plugin.name, {}))
+        contexts[plugin.name] = {**core, "plugin": SimpleNamespace(**resolved.values)}
+    return contexts
 
 
 def _admin_home(settings: Settings) -> str:
@@ -105,58 +128,100 @@ def closing_line(verb: ClosingVerb, host: Host, settings: Settings) -> str:
     )
 
 
-def _validate_slugs(
-    *, only: Sequence[str], start_from: str | None, skip: Sequence[str]
-) -> None:
-    """Raise StepSelectionError naming every valid slug if any named slug is unknown."""
-    valid_slugs = {step.slug for step in STEPS}
-    named_slugs = [*only, *skip]
-    if start_from is not None:
-        named_slugs.append(start_from)
-    for slug in named_slugs:
-        if slug not in valid_slugs:
-            valid = ", ".join(step.slug for step in STEPS)
-            raise StepSelectionError(f"unknown step {slug!r}: valid steps are {valid}")
+def run_order(plugins: Sequence[Plugin]) -> tuple[Step, ...]:
+    """Return every step in run order: core, then each plugin's, in list order."""
+    return (*STEPS, *(step for plugin in plugins for step in plugin.steps))
+
+
+def _plugin_names(steps: Iterable[Step]) -> list[str]:
+    """Return each plugin that supplies one of `steps`, in run order."""
+    return list(dict.fromkeys(step.plugin for step in steps if step.plugin))
+
+
+def _selects(name: str, step: Step) -> bool:
+    """Return whether `name` selects `step`: its own name, or its plugin's."""
+    return name in (step.name, step.plugin)
+
+
+def _validate_names(steps: Sequence[Step], names: Iterable[str]) -> None:
+    """Raise StepSelectionError naming every valid name if any name is unknown."""
+    plugins = _plugin_names(steps)
+    valid_names = {step.name for step in steps} | set(plugins)
+    for name in names:
+        if name not in valid_names:
+            message = (
+                f"unknown step {name!r}: valid steps are"
+                f" {', '.join(step.name for step in steps)}"
+            )
+            if plugins:
+                message += f"; valid plugins are {', '.join(plugins)}"
+            raise StepSelectionError(message)
 
 
 def select_steps(
+    steps: Sequence[Step],
     *,
     only: Sequence[str] = (),
     start_from: str | None = None,
     skip: Sequence[str] = (),
 ) -> tuple[Step, ...]:
-    """Select and order steps from the module-global STEPS.
+    """Select steps from `steps`, keeping their order.
 
-    `only` keeps just the named steps, in registry order. `start_from` drops
-    every step before the named one and keeps it onward. With neither, every
-    step is kept. `skip` then removes the named steps from that result.
+    Each name is a step's name, or a bare plugin name that stands for every
+    step of that plugin. `only` keeps just the named steps. `start_from` drops
+    every step before the first one the name selects and keeps it onward. With
+    neither, every step is kept. `skip` then removes the named steps from that
+    result.
 
     Raises:
         StepSelectionError: `only` and `start_from` are both given, or a
-            named slug matches no step in STEPS.
+            name selects no step in `steps`.
     """
     if only and start_from is not None:
         raise StepSelectionError("--only and --from cannot be combined")
-    _validate_slugs(only=only, start_from=start_from, skip=skip)
+    named = [*only, *skip] if start_from is None else [*only, *skip, start_from]
+    _validate_names(steps, named)
 
     if only:
-        selected = [step for step in STEPS if step.slug in only]
+        selected = [step for step in steps if any(_selects(n, step) for n in only)]
     elif start_from is not None:
-        index = next(i for i, step in enumerate(STEPS) if step.slug == start_from)
-        selected = list(STEPS[index:])
+        index = next(i for i, step in enumerate(steps) if _selects(start_from, step))
+        selected = list(steps[index:])
     else:
-        selected = list(STEPS)
+        selected = list(steps)
 
-    return tuple(step for step in selected if step.slug not in skip)
+    return tuple(step for step in selected if not any(_selects(n, step) for n in skip))
+
+
+@functools.cache
+def template_environment(directory: Path) -> Environment:
+    """Return the one Jinja environment for templates rooted at `directory`.
+
+    A template's includes resolve from `directory` first, then from core's
+    step directory, so a plugin template can include a core partial.
+    """
+    environment = Environment(
+        loader=FileSystemLoader([directory, STEPS_DIR]),
+        undefined=StrictUndefined,
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True,
+        autoescape=False,  # noqa: S701 — these render shell; HTML escaping corrupts it
+    )
+    environment.filters["shell_quote"] = lambda value: shlex.quote(str(value))
+    return environment
 
 
 def render_steps(
-    steps: Sequence[Step], context: Mapping[str, object]
+    steps: Sequence[Step], contexts: StepContexts
 ) -> tuple[RenderedStep, ...]:
-    """Render each step's template against `context`."""
+    """Render each step's template against the context for its plugin."""
     return tuple(
         RenderedStep(
-            step=step, script=environment.get_template(step.template).render(context)
+            step=step,
+            script=template_environment(step.directory)
+            .get_template(step.template)
+            .render(contexts[step.plugin]),
         )
         for step in steps
     )
@@ -171,29 +236,29 @@ def provision_host(
 
     Reports progress through `report`: one "running" line before a step
     runs, and one result line after it. Returns the outcome of every step
-    that ran, and the slug of the mandatory step that stopped the run, if
+    that ran, and the name of the mandatory step that stopped the run, if
     any.
     """
     outcomes: list[StepOutcome] = []
     for item in rendered:
-        slug = item.step.slug
-        report(f"{slug}: running")
+        name = item.step.name
+        report(f"{name}: running")
         result = runner(item.step, item.script)
 
         if result.exit_code == 0:
-            report(f"{slug}: ok")
-            outcomes.append(StepOutcome(slug, "ok", 0, result.stderr))
+            report(f"{name}: ok")
+            outcomes.append(StepOutcome(name, "ok", 0, result.stderr))
             continue
 
         if not item.step.mandatory:
-            report(f"{slug}: failed with exit {result.exit_code} (optional)")
+            report(f"{name}: failed with exit {result.exit_code} (optional)")
             outcomes.append(
-                StepOutcome(slug, "warned", result.exit_code, result.stderr)
+                StepOutcome(name, "warned", result.exit_code, result.stderr)
             )
             continue
 
-        report(f"{slug}: failed with exit {result.exit_code}")
-        outcomes.append(StepOutcome(slug, "failed", result.exit_code, result.stderr))
-        return ProvisionResult(outcomes=tuple(outcomes), aborted_at=slug)
+        report(f"{name}: failed with exit {result.exit_code}")
+        outcomes.append(StepOutcome(name, "failed", result.exit_code, result.stderr))
+        return ProvisionResult(outcomes=tuple(outcomes), aborted_at=name)
 
     return ProvisionResult(outcomes=tuple(outcomes), aborted_at=None)

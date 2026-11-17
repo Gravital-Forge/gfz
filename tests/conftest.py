@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,8 @@ REQUIRED_ENV = {
 }
 
 NEW_HOST_ID = 909
+
+EXAMPLE_DIR = Path(__file__).parent.parent / "examples" / "hello"
 
 
 @pytest.fixture(autouse=True)
@@ -236,7 +239,7 @@ REMOTE_FAILURE_STDERR = "E: Unable to locate package nonesuch"
 class FakeScriptRunner:
     """A ScriptRunner that records runs instead of opening an ssh connection.
 
-    `failures` maps a step's slug to the exit code that step's run reports;
+    `failures` maps a step's name to the exit code that step's run reports;
     every step it does not name reports success. A failing run also reports
     REMOTE_FAILURE_STDERR on stderr, so a test can look for it in output.
     """
@@ -252,14 +255,14 @@ class FakeScriptRunner:
         return [(step.login, script) for step, script in self.runs]
 
     @property
-    def slugs(self) -> list[str]:
-        """The slug of every step that ran, in run order."""
-        return [step.slug for step, _ in self.runs]
+    def names(self) -> list[str]:
+        """The name of every step that ran, in run order."""
+        return [step.name for step, _ in self.runs]
 
     def __call__(self, step: Step, script: str) -> RemoteResult:
         """Record the run and report the exit code scripted for this step."""
         self.runs.append((step, script))
-        exit_code = self.failures.get(step.slug, 0)
+        exit_code = self.failures.get(step.name, 0)
         stderr = REMOTE_FAILURE_STDERR if exit_code != 0 else ""
         return RemoteResult(exit_code=exit_code, stdout="", stderr=stderr)
 

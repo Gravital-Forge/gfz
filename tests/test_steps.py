@@ -7,11 +7,19 @@ import subprocess
 import pytest
 from jinja2 import meta
 
-from gfz.provision import environment
+from gfz.plugin import load_plugins
+from gfz.provision import plugin_contexts, render_steps, run_order, template_environment
 from gfz.steps.registry import STEPS, STEPS_DIR, Login
-from tests.conftest import make_step
+from tests.conftest import EXAMPLE_DIR, make_step
+
+environment = template_environment(STEPS_DIR)
+
+PLUGINS = load_plugins(["claude", str(EXAMPLE_DIR)])
 
 PARAMETRIZE_STEPS = pytest.mark.parametrize("step", STEPS, ids=lambda step: step.slug)
+PARAMETRIZE_ALL_STEPS = pytest.mark.parametrize(
+    "step", run_order(PLUGINS), ids=lambda step: step.name
+)
 
 STEP_SLUGS = (
     "base-packages",
@@ -265,21 +273,27 @@ def test_every_slug_is_hyphenated_and_every_template_is_underscored():
         assert step.template == step.slug.replace("-", "_") + ".sh.j2"
 
 
-@PARAMETRIZE_STEPS
-def test_rendered_script_opens_with_the_shell_prologue(step, template_context):
+def _render(step, settings):
+    """Render one core or plugin step against the context its plugin gets."""
+    (rendered,) = render_steps([step], plugin_contexts(settings, PLUGINS, {}, {}))
+    return rendered.script
+
+
+@PARAMETRIZE_ALL_STEPS
+def test_rendered_script_opens_with_the_shell_prologue(step, settings):
     """A rendered script starts with the shell prologue, and carries no shebang.
 
     The runner feeds the script to `bash -s`, so a shebang would be inert.
     """
-    script = environment.get_template(step.template).render(template_context)
+    script = _render(step, settings)
     assert script.startswith("set -euo pipefail")
     assert not script.startswith("#!")
 
 
-@PARAMETRIZE_STEPS
-def test_rendered_script_leaves_no_jinja_behind(step, template_context):
+@PARAMETRIZE_ALL_STEPS
+def test_rendered_script_leaves_no_jinja_behind(step, settings):
     """A rendered script carries no unresolved Jinja delimiter."""
-    script = environment.get_template(step.template).render(template_context)
+    script = _render(step, settings)
     assert "{{" not in script
     assert "{%" not in script
 
@@ -299,15 +313,15 @@ def test_every_context_value_a_template_uses_reaches_the_script(step, template_c
         assert str(template_context[name]) in script
 
 
-@PARAMETRIZE_STEPS
-def test_rendered_script_passes_shellcheck(step, template_context, tmp_path):
+@PARAMETRIZE_ALL_STEPS
+def test_rendered_script_passes_shellcheck(step, settings, tmp_path):
     """A rendered script passes shellcheck under an explicit bash shell.
 
     `--shell=bash` is load-bearing: a rendered script carries no shebang, so
     shellcheck left to guess assumes `sh` and rejects `pipefail`.
     """
-    script = environment.get_template(step.template).render(template_context)
-    script_path = tmp_path / f"{step.slug}.sh"
+    script = _render(step, settings)
+    script_path = tmp_path / f"{step.name.replace('/', '-')}.sh"
     script_path.write_text(script)
     binary = shutil.which("shellcheck")
     assert binary is not None
