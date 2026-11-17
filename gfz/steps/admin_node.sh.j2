@@ -1,0 +1,14 @@
+set -euo pipefail
+
+if [ ! -f "{{ admin_home }}/.nvm/nvm.sh" ]; then
+  sudo -u "{{ admin_user }}" -i bash -c \
+    'curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.7/install.sh | bash'
+fi
+
+sudo -u "{{ admin_user }}" -i bash -c \
+  '. ~/.nvm/nvm.sh && nvm install 24 && corepack enable pnpm'
+
+if [ ! -x "{{ admin_home }}/.local/bin/claude" ]; then
+  sudo -u "{{ admin_user }}" -i bash -c \
+    'curl -fsSL https://claude.ai/install.sh | bash'
+fi

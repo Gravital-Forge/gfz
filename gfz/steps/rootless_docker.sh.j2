@@ -1,0 +1,14 @@
+set -euo pipefail
+
+agent_uid="$(id -u "{{ agent_user }}")"
+
+run_as_agent() {
+  sudo -u "{{ agent_user }}" \
+    XDG_RUNTIME_DIR="/run/user/${agent_uid}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${agent_uid}/bus" \
+    "$@"
+}
+
+if ! run_as_agent systemctl --user is-enabled docker.service >/dev/null 2>&1; then
+  run_as_agent PATH=/usr/bin:/bin:/usr/sbin:/sbin dockerd-rootless-setuptool.sh install
+fi

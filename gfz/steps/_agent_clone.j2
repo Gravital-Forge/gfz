@@ -1,0 +1,25 @@
+# The provisioning session has no terminal, so ssh cannot prompt about an
+# unknown host key. gfz's own transport accepts a new one the same way.
+export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
+
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+
+# Only the agent's own git writes into the tree, so every file it creates takes
+# the tree's group and default ACLs. The local transport drops -c config, so the
+# ownership exception for the admin's bare clone rides on upload-pack itself.
+agent_clone() {
+  local remote="$1"
+  local destination="$2"
+  local origin bare
+  origin="$(github_origin "$remote")"
+  bare="$staging/$(basename "$destination").git"
+  git clone --bare --quiet "$remote" "$bare"
+  setfacl -R -m "u:{{ agent_user }}:rX" "$staging"
+  (
+    cd /
+    sudo -u "{{ agent_user }}" -H git clone --no-local --quiet \
+      --upload-pack "git -c safe.directory='*' upload-pack" "$bare" "$destination"
+    sudo -u "{{ agent_user }}" -H git -C "$destination" remote set-url origin "$origin"
+  )
+}

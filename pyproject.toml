@@ -1,0 +1,84 @@
+# gfz, the droplet lifecycle CLI for this deployment's agent hosts.
+# Its own uv package under tools/, discovered by CI like every other
+# package in this workspace.
+[project]
+name = "gfz"
+version = "0.1.0"
+description = "Droplet lifecycle CLI for this deployment's agent hosts."
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.27",
+    "httpx>=0.28",
+    "pydantic-settings>=2.15",
+    "jinja2>=3.1",
+]
+
+[project.scripts]
+gfz = "gfz.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.8", "poethepoet>=0.48.0", "shellcheck-py>=0.10"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Naming the package pins what the wheel carries, step templates included,
+# instead of leaving it to hatchling's discovery.
+[tool.hatch.build.targets.wheel]
+packages = ["gfz"]
+
+[tool.poe.executor]
+type = "uv"
+
+[tool.poe.tasks.lint]
+sequence = [
+    { cmd = "ruff check ." },
+    { cmd = "ruff format --check ." },
+]
+
+[tool.poe.tasks.test]
+cmd = "pytest"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "D",    # pydocstyle (flake8-docstrings)
+    "ERA",  # eradicate
+    "S",    # flake8-bandit
+    "PGH003",  # blanket `# type: ignore` without a code
+    "PGH004",  # blanket `# noqa` without a code
+    "RUF100",  # unused or stale suppression
+    "TID251",  # banned API; see flake8-tidy-imports.banned-api below
+    "BLE001",  # blind `except Exception`
+    "UP",      # pyupgrade: legacy typing constructs
+    "PTH",     # flake8-use-pathlib
+    "ANN401",  # bare `Any`; the ANN family as a whole is not selected
+]
+ignore = ["D104", "D100", "D101", "D106"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"__future__.annotations" = { msg = "PEP 563 stringization is deprecated; PEP 649 handles forward references natively." }
+
+[tool.ruff.lint.flake8-builtins]
+builtins-ignorelist = ["id"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"

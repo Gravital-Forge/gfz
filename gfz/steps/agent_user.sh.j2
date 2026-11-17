@@ -1,0 +1,25 @@
+set -euo pipefail
+
+if ! id -u "{{ agent_user }}" >/dev/null 2>&1; then
+  useradd --create-home --user-group --shell /bin/bash "{{ agent_user }}"
+fi
+
+chmod 700 "{{ agent_home }}"
+chown "{{ agent_user }}:{{ agent_user }}" "{{ agent_home }}"
+
+if ! grep -q "^{{ agent_user }}:" /etc/subuid /etc/subgid; then
+  start="$(awk -F: '{e=$2+$3; if(e>m)m=e} END{print (m<100000?100000:m)}' /etc/subuid)"
+  usermod --add-subuids "${start}-$((start + 65535))" "{{ agent_user }}"
+  usermod --add-subgids "${start}-$((start + 65535))" "{{ agent_user }}"
+fi
+
+sudo -u "{{ agent_user }}" mkdir -p "{{ agent_home }}/Projects"
+
+install -d -m 0700 -o "{{ agent_user }}" -g "{{ agent_user }}" "{{ agent_home }}/.ssh"
+target="{{ agent_home }}/.ssh/authorized_keys"
+touch "$target"
+while IFS= read -r line || [ -n "$line" ]; do
+  grep -qxF -- "$line" "$target" || printf '%s\n' "$line" >> "$target"
+done < /root/.ssh/authorized_keys
+chmod 0600 "$target"
+chown "{{ agent_user }}:{{ agent_user }}" "$target"

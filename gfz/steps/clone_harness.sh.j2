@@ -1,0 +1,12 @@
+set -euo pipefail
+
+if sudo test -e "{{ workspace }}"; then
+  echo "{{ workspace }} is already there; leaving it as found"
+  exit 0
+fi
+
+{% include "_github_origin.j2" %}
+
+{% include "_agent_clone.j2" %}
+
+agent_clone "{{ harness_repo }}" "{{ workspace }}"
