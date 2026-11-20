@@ -358,3 +358,7 @@ instead.
 The repository is one uv package. From a clone, `uv run gfz --help` runs the tool from source.
 `poe lint` and `poe test` run the linters and the test suite; the suite replaces DigitalOcean and
 ssh with fakes, so it needs no token and no droplet.
+
+## License
+
+`gfz` is released under the MIT License. See [LICENSE](LICENSE).
