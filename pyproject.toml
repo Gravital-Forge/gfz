@@ -3,6 +3,7 @@ name = "gfz"
 version = "0.1.0"
 description = "Create and provision DigitalOcean droplets for coding agents, extended by plugins."
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
     "typer>=0.27",
     "httpx>=0.28",
